@@ -40,6 +40,11 @@ build_trace_sheet.bat
 
 L'applicazione verrà generata in `dist\TraceSheetStudio\TraceSheetStudio.exe`.
 
+Una build automatica viene generata anche da GitHub Actions. Aprire la scheda **Actions**,
+selezionare l'ultima esecuzione riuscita di **Windows portable build** e scaricare l'artifact
+`TraceSheetStudio-Windows-x64` dalla sezione Artifacts. Estrarre l'intero archivio prima di
+avviare `TraceSheetStudio.exe`.
+
 ## Stato e limiti noti
 
 La modalità monolinea è il percorso principale del primo checkpoint. La modalità a sagome è
