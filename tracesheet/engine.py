@@ -169,7 +169,14 @@ def _rdp(points: list[tuple[float, float]], epsilon: float) -> list[tuple[float,
     values = np.asarray(points, dtype=float)
     line = end - start
     norm = np.linalg.norm(line)
-    distances = np.linalg.norm(values - start, axis=1) if norm == 0 else np.abs(np.cross(line, values - start) / norm)
+    delta = values - start
+    if norm == 0:
+        distances = np.linalg.norm(delta, axis=1)
+    else:
+        # NumPy 2.5 removed the legacy two-dimensional np.cross behavior.
+        # The scalar 2D cross product is the signed parallelogram area.
+        cross_2d = line[0] * delta[:, 1] - line[1] * delta[:, 0]
+        distances = np.abs(cross_2d) / norm
     index = int(np.argmax(distances))
     if distances[index] <= epsilon:
         return [points[0], points[-1]]
