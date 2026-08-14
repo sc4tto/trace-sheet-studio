@@ -167,3 +167,21 @@ def test_combined_analysis_adds_threshold_lines_to_color_boundaries():
     assert len(combined.paths) > len(color.paths)
     assert combined.vector_layers
     assert combined.vector_layers["02_CURVE_GENERATRICI"] == combined.paths
+
+
+def test_structural_mode_separates_primary_boundaries_from_fine_texture():
+    image = Image.new("RGB", (180, 120), "#d6aa72")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((90, 0, 179, 119), fill="#704126")
+    for y in range(8, 118, 7):
+        draw.line((5, y, 84, y), fill="#bd8e5c", width=1)
+        draw.line((96, y, 174, y), fill="#8a5737", width=1)
+    result = trace_image(
+        image, TraceSettings(mode="structural", texture_suppression=13,
+                             structural_strength=0.62, min_path_pixels=8,
+                             simplify_pixels=1.5, recognition_mode="hybrid"),
+    )
+    assert result.paths
+    assert result.vector_layers
+    assert result.vector_layers["02_CURVE_GENERATRICI"] == result.paths
+    assert "05_DETTAGLI_SECONDARI" in result.vector_layers

@@ -5,7 +5,11 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.7.1-test**.
+Versione corrente: **0.8.0-test**.
+
+La modalità **Ricalco strutturale** confronta i bordi a tre scale: le risposte
+persistenti diventano curve generatrici primarie, mentre i dettagli presenti
+soltanto alla scala fine vengono separati nel layer `05_DETTAGLI_SECONDARI`.
 
 Ogni cursore dispone ora di un campo numerico sincronizzato e modificabile. Il
 programma si apre con il preset **Intarsio – direttrici principali**, calibrato

@@ -39,6 +39,7 @@ class TraceSettings:
     texture_suppression: int = 13
     region_merge_delta: float = 7.0
     generator_angle: float = 24.0
+    structural_strength: float = 0.62
     max_dimension: int = 1400
 
 
@@ -473,7 +474,9 @@ def segment_from_samples(image: Image.Image,
 
 def prepare_raster(image: Image.Image, settings: TraceSettings) -> tuple[Image.Image, np.ndarray, float]:
     work, scale = _resize_for_processing(image.convert("RGB"), settings.max_dimension)
-    if settings.mode in {"contours", "combined"}:
+    if settings.mode == "structural":
+        raster, mask, _primary, _secondary = _multiscale_structural_paths(work, settings)
+    elif settings.mode in {"contours", "combined"}:
         raster, _labels, mask = _segment_regions(work, settings)
         if settings.mode == "combined":
             line_mask = _threshold_mask(work, settings)
@@ -801,6 +804,68 @@ def _directional_flow_paths(image: Image.Image, settings: TraceSettings
     return raster, thin, paths
 
 
+def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
+                                 ) -> tuple[Image.Image, np.ndarray,
+                                            list[list[tuple[float, float]]],
+                                            list[list[tuple[float, float]]]]:
+    """Keep boundaries persistent across scales and relegate fine texture to details."""
+    if cv2 is None:
+        raise RuntimeError("Il ricalco strutturale richiede opencv-python-headless.")
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    strength = float(np.clip(settings.structural_strength, 0.05, 0.95))
+    base = max(1.0, float(settings.texture_suppression) / 5.0)
+
+    def scale_edges(sigma: float) -> np.ndarray:
+        blurred = cv2.GaussianBlur(lab, (0, 0), sigma)
+        # L carries tonal seams; a/b preserve borders between similarly lit woods.
+        luminance = cv2.Canny(blurred[..., 0], 24, 68)
+        chroma_a = cv2.Canny(blurred[..., 1], 5, 16)
+        chroma_b = cv2.Canny(blurred[..., 2], 5, 16)
+        return (luminance > 0) | (chroma_a > 0) | (chroma_b > 0)
+
+    fine = scale_edges(max(0.7, base * 0.45))
+    medium = scale_edges(max(1.4, base))
+    large = scale_edges(max(2.8, base * (1.8 + strength)))
+    radius = max(1, round(1 + strength * 3))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1,) * 2)
+    supported_large = cv2.dilate(large.astype(np.uint8), kernel).astype(bool)
+    supported_medium = cv2.dilate(medium.astype(np.uint8), kernel).astype(bool)
+    primary = medium & supported_large
+    # A boundary present at fine and medium scale is already persistent; this
+    # retains narrow assembly seams that may disappear after the widest blur.
+    primary |= fine & supported_medium
+    # Very strong large-scale borders remain useful even if the medium response is interrupted.
+    primary |= large & cv2.dilate(medium.astype(np.uint8), kernel).astype(bool)
+    primary = cv2.morphologyEx(primary.astype(np.uint8), cv2.MORPH_CLOSE,
+                               np.ones((3, 3), np.uint8)).astype(bool)
+    count, components, stats, _ = cv2.connectedComponentsWithStats(primary.astype(np.uint8), 8)
+    cleaned = np.zeros_like(primary)
+    minimum = max(3, int(settings.min_path_pixels // 2))
+    for component_id in range(1, count):
+        if int(stats[component_id, cv2.CC_STAT_AREA]) >= minimum:
+            cleaned |= components == component_id
+    primary_thin = skeletonize(cleaned)
+    fragments = skeleton_to_paths(
+        primary_thin, settings.min_path_pixels, settings.simplify_pixels)
+    chains = _join_boundary_strokes(
+        fragments, settings.generator_angle, max(5.0, settings.flow_gap * 0.60))
+    primary_paths = recognize_paths(
+        chains, "hybrid" if settings.recognition_mode == "flows"
+        else settings.recognition_mode, settings.line_tolerance)
+
+    exclusion = cv2.dilate(cleaned.astype(np.uint8), kernel).astype(bool)
+    secondary_mask = fine & ~exclusion
+    secondary_thin = skeletonize(secondary_mask)
+    secondary_paths = skeleton_to_paths(
+        secondary_thin, max(settings.min_path_pixels * 2, 12),
+        max(settings.simplify_pixels, 1.5))
+    raster_array = np.full((*primary.shape, 3), 255, dtype=np.uint8)
+    raster_array[secondary_thin] = (190, 190, 190)
+    raster_array[primary_thin] = (0, 0, 0)
+    return Image.fromarray(raster_array, mode="RGB"), primary_thin, primary_paths, secondary_paths
+
+
 def _overlay(original: Image.Image, paths: Iterable[Iterable[tuple[float, float]]], scale: float) -> Image.Image:
     from PIL import ImageDraw
 
@@ -818,7 +883,14 @@ def _overlay(original: Image.Image, paths: Iterable[Iterable[tuple[float, float]
 def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
     original = image.convert("RGB")
     vector_layers = None
-    if settings.mode in {"contours", "combined"}:
+    if settings.mode == "structural":
+        work, scale = _resize_for_processing(original, settings.max_dimension)
+        raster, thin, paths, secondary_paths = _multiscale_structural_paths(work, settings)
+        vector_layers = {
+            "02_CURVE_GENERATRICI": paths,
+            "05_DETTAGLI_SECONDARI": secondary_paths,
+        }
+    elif settings.mode in {"contours", "combined"}:
         work, scale = _resize_for_processing(original, settings.max_dimension)
         raster, labels, _raw_boundary = _segment_regions(work, settings)
         tile_paths = _region_paths(labels, settings.min_region_area, settings.simplify_pixels)

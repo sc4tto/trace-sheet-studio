@@ -120,10 +120,10 @@ class TraceSheetApp(tk.Tk):
 
         box = ttk.LabelFrame(controls, text="2. Tipo di ricalco", padding=7)
         box.pack(fill="x", pady=4)
-        self.mode_var = tk.StringVar(value="Analisi combinata")
+        self.mode_var = tk.StringVar(value="Ricalco strutturale")
         combo = ttk.Combobox(box, state="readonly", textvariable=self.mode_var,
                              values=["Linee centrali", "Contorni delle sagome",
-                                     "Analisi combinata"], width=28)
+                                     "Analisi combinata", "Ricalco strutturale"], width=28)
         combo.pack(fill="x")
         combo.bind("<<ComboboxSelected>>", lambda _e: self._mode_changed())
         self.mode_help = ttk.Label(box, text="Per planimetrie, aste e disegni tecnici.", wraplength=290)
@@ -163,9 +163,12 @@ class TraceSheetApp(tk.Tk):
         self.texture_row = self._row_scale(box, 10, "Soppressione texture", self.texture_suppression_var, 1, 31)
         self.region_merge_var = tk.DoubleVar(value=7.0)
         self.region_merge_row = self._row_scale(box, 11, "Fusione aree", self.region_merge_var, 0.0, 35.0)
+        self.structural_strength_var = tk.DoubleVar(value=0.62)
+        self.structural_row = self._row_scale(
+            box, 12, "Persistenza strutturale", self.structural_strength_var, 0.05, 0.95)
         self.live_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(box, text="Anteprima in tempo reale", variable=self.live_var,
-                        command=self._schedule_live_preview).grid(row=12, column=0, columnspan=2, sticky="w", pady=(5, 0))
+                        command=self._schedule_live_preview).grid(row=13, column=0, columnspan=3, sticky="w", pady=(5, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="4. Geometria", padding=7)
@@ -309,7 +312,7 @@ class TraceSheetApp(tk.Tk):
 
     def _apply_inlay_preset(self):
         """Recommended editable starting point for the reference wood-inlay photo."""
-        self.mode_var.set("Analisi combinata")
+        self.mode_var.set("Ricalco strutturale")
         self.threshold_mode_var.set("Otsu automatica")
         self.threshold_var.set(185)
         self.sauvola_window_var.set(31)
@@ -322,6 +325,7 @@ class TraceSheetApp(tk.Tk):
         self.min_region_var.set(80)
         self.texture_suppression_var.set(13)
         self.region_merge_var.set(7.0)
+        self.structural_strength_var.set(0.62)
         self.recognition_var.set("Ibrido")
         self.minimum_var.set(12)
         self.simplify_var.set(2.0)
@@ -332,7 +336,7 @@ class TraceSheetApp(tk.Tk):
         self._mode_changed()
 
     def _threshold_mode_changed(self, schedule=True):
-        threshold_active = self.mode_var.get() != "Contorni delle sagome"
+        threshold_active = self.mode_var.get() in {"Linee centrali", "Analisi combinata"}
         manual = self.threshold_mode_var.get() == "Manuale"
         sauvola = self.threshold_mode_var.get() == "Sauvola locale"
         for widget in self.threshold_row:
@@ -345,7 +349,10 @@ class TraceSheetApp(tk.Tk):
     def _mode_changed(self):
         contours = self.mode_var.get() in {"Contorni delle sagome", "Analisi combinata"}
         combined = self.mode_var.get() == "Analisi combinata"
-        if combined:
+        structural = self.mode_var.get() == "Ricalco strutturale"
+        if structural:
+            help_text = "Conserva i bordi persistenti a più scale ed esclude la venatura fine."
+        elif combined:
             help_text = "Combina aree cromatiche con soglia, fessure e linee persistenti."
         elif contours:
             help_text = "Per intarsi, campiture e confini fra aree cromatiche."
@@ -354,9 +361,13 @@ class TraceSheetApp(tk.Tk):
         self.mode_help.configure(text=help_text)
         state = "normal" if contours else "disabled"
         for row in (self.colors_row, self.region_color_row, self.min_region_row,
-                    self.texture_row, self.region_merge_row):
+                    self.region_merge_row):
             for widget in row:
                 widget.configure(state=state)
+        for widget in self.texture_row:
+            widget.configure(state="normal" if contours or structural else "disabled")
+        for widget in self.structural_row:
+            widget.configure(state="normal" if structural else "disabled")
         if contours and self.blur_var.get() < 2.0:
             self.blur_var.set(2.0)
         elif not contours and self.blur_var.get() > 1.5:
@@ -409,7 +420,8 @@ class TraceSheetApp(tk.Tk):
         threshold_mode = threshold_modes[self.threshold_mode_var.get()]
         mode_names = {"Linee centrali": "centerline",
                       "Contorni delle sagome": "contours",
-                      "Analisi combinata": "combined"}
+                      "Analisi combinata": "combined",
+                      "Ricalco strutturale": "structural"}
         return TraceSettings(
             mode=mode_names[self.mode_var.get()],
             threshold_mode=threshold_mode,
@@ -429,6 +441,7 @@ class TraceSheetApp(tk.Tk):
             texture_suppression=round(self.texture_suppression_var.get()),
             region_merge_delta=float(self.region_merge_var.get()),
             generator_angle=float(self.flow_angle_var.get()),
+            structural_strength=float(self.structural_strength_var.get()),
         )
 
     def _schedule_live_preview(self, immediate=False):
@@ -460,7 +473,8 @@ class TraceSheetApp(tk.Tk):
             maximum = 450
         else:
             maximum = 600 if self.mode_var.get() in {
-                "Contorni delle sagome", "Analisi combinata"} else 750
+                "Contorni delle sagome", "Analisi combinata",
+                "Ricalco strutturale"} else 750
         settings = replace(self._settings(), max_dimension=maximum)
         image = self.source_image.copy()
         threading.Thread(target=self._live_worker, args=(token, image, settings), daemon=True).start()
@@ -601,6 +615,10 @@ class TraceSheetApp(tk.Tk):
                         layer_count = len(result.vector_layers.get("01_TESSERE_CHIUSE", [])) if result.vector_layers else 0
                         description = (f"{layer_count} tessere | fusione {settings.region_merge_delta:.1f}"
                                        f" | texture {settings.texture_suppression}")
+                    elif settings.mode == "structural":
+                        secondary = len(result.vector_layers.get("05_DETTAGLI_SECONDARI", [])) if result.vector_layers else 0
+                        description = (f"Strutturale {settings.structural_strength:.2f}"
+                                       f" | secondarie {secondary}")
                     else:
                         black = 100.0 * result.raster.histogram()[0] / (result.raster.width * result.raster.height)
                         description = settings.threshold_mode.capitalize()

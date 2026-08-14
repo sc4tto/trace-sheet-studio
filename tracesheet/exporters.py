@@ -26,7 +26,8 @@ def export_dxf(result: TraceResult, path: str | Path, mm_per_pixel: float = 1.0)
     exported = 0
     layers = result.vector_layers or {"RICALCO": result.paths}
     colors = {"01_TESSERE_CHIUSE": 8, "02_CURVE_GENERATRICI": 1,
-              "03_PERIMETRO": 7, "04_VENATURE": 3, "RICALCO": 1}
+              "03_PERIMETRO": 7, "04_VENATURE": 3,
+              "05_DETTAGLI_SECONDARI": 9, "RICALCO": 1}
     for layer_name, paths in layers.items():
         if layer_name not in document.layers:
             document.layers.add(layer_name, color=colors.get(layer_name, 7))
