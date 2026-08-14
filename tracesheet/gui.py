@@ -7,9 +7,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
-from .engine import TraceResult, TraceSettings, prepare_raster, trace_image
+from .engine import TraceResult, TraceSettings, prepare_raster, segment_from_samples, trace_image
 from .exporters import export_dxf, export_raster
 from .version import APP_VERSION
 
@@ -32,6 +32,10 @@ class TraceSheetApp(tk.Tk):
         self.prepared_raster: Image.Image | None = None
         self.prepared_settings: TraceSettings | None = None
         self.preview_refs: dict[str, ImageTk.PhotoImage] = {}
+        self.preview_geometry: dict[str, tuple[int, int, int, int, float]] = {}
+        self.positive_samples: list[tuple[int, int]] = []
+        self.negative_samples: list[tuple[int, int]] = []
+        self.sample_after_id = None
         self.events: queue.Queue = queue.Queue()
         self.live_after_id: str | None = None
         self.live_token = 0
@@ -187,6 +191,29 @@ class TraceSheetApp(tk.Tk):
         self.summary = ttk.Label(box, text="Nessun ricalco generato", wraplength=290)
         self.summary.pack(anchor="w", pady=(6, 0))
 
+        sample_box = ttk.LabelFrame(controls, text="6. Segmentazione per campioni", padding=7)
+        sample_box.pack(fill="x", pady=4)
+        ttk.Label(sample_box, text="Sull'Originale: sinistro = interno, destro = esterno",
+                  wraplength=290).pack(anchor="w")
+        self.sample_model_var = tk.StringVar(value="Gradiente lineare OKLab")
+        model_combo = ttk.Combobox(sample_box, state="readonly", textvariable=self.sample_model_var,
+                                   values=["Colore medio OKLab", "Gradiente lineare OKLab"], width=27)
+        model_combo.pack(fill="x", pady=(5, 0))
+        model_combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_sample_preview())
+        self.sample_tolerance_var = tk.DoubleVar(value=0.055)
+        tolerance_frame = ttk.Frame(sample_box)
+        tolerance_frame.pack(fill="x", pady=(5, 0))
+        ttk.Label(tolerance_frame, text="Tolleranza").pack(side="left")
+        ttk.Scale(tolerance_frame, from_=0.01, to=0.20, variable=self.sample_tolerance_var,
+                  command=lambda _v: self._schedule_sample_preview()).pack(
+                      side="right", fill="x", expand=True, padx=(8, 0))
+        self.sample_count_label = ttk.Label(sample_box, text="Positivi: 0 | Negativi: 0")
+        self.sample_count_label.pack(anchor="w", pady=(5, 0))
+        ttk.Button(sample_box, text="Calcola regione dai campioni",
+                   command=self.start_sample_segmentation).pack(fill="x", pady=(5, 0))
+        ttk.Button(sample_box, text="Cancella campioni",
+                   command=self.clear_samples).pack(fill="x", pady=(5, 0))
+
         self.notebook = ttk.Notebook(preview)
         self.notebook.pack(fill="both", expand=True)
         for key, title_text, placeholder in [
@@ -201,6 +228,9 @@ class TraceSheetApp(tk.Tk):
             label.pack(fill="both", expand=True)
             setattr(self, f"{key}_label", label)
             label.bind("<Configure>", lambda _e, k=key: self._refresh_preview(k))
+            if key == "original":
+                label.bind("<Button-1>", lambda event: self._add_sample(event, True))
+                label.bind("<Button-3>", lambda event: self._add_sample(event, False))
 
         status = tk.Frame(root, background=self.FACE, relief="sunken", borderwidth=2)
         status.pack(fill="x", pady=(5, 0))
@@ -262,6 +292,9 @@ class TraceSheetApp(tk.Tk):
         self.trace_toolbar.configure(state="disabled")
         self.raster_toolbar.configure(state="disabled")
         self.dxf_toolbar.configure(state="disabled")
+        self.positive_samples.clear()
+        self.negative_samples.clear()
+        self._update_sample_label()
         self.file_label.configure(text=f"{self.source_path.name}\n{self.source_image.width} × {self.source_image.height} px")
         self._set_image("original", self.source_image)
         self.status_label.configure(text="Immagine caricata. Regola i parametri e genera il ricalco.")
@@ -360,6 +393,74 @@ class TraceSheetApp(tk.Tk):
         except Exception as exc:
             self.events.put(("error", exc))
 
+    def _add_sample(self, event, positive):
+        geometry = self.preview_geometry.get("original")
+        if self.source_image is None or geometry is None:
+            return
+        offset_x, offset_y, shown_w, shown_h, scale = geometry
+        if not (offset_x <= event.x < offset_x + shown_w and offset_y <= event.y < offset_y + shown_h):
+            return
+        x = min(self.source_image.width - 1, max(0, round((event.x - offset_x) / scale)))
+        y = min(self.source_image.height - 1, max(0, round((event.y - offset_y) / scale)))
+        (self.positive_samples if positive else self.negative_samples).append((x, y))
+        self._update_sample_label()
+        self._set_image("original", self._marked_original())
+        self._schedule_sample_preview()
+
+    def _marked_original(self):
+        marked = self.source_image.copy()
+        draw = ImageDraw.Draw(marked)
+        radius = max(3, round(max(marked.size) / 300))
+        for x, y in self.positive_samples:
+            draw.ellipse((x-radius, y-radius, x+radius, y+radius),
+                         fill="#00D020", outline="white", width=2)
+        for x, y in self.negative_samples:
+            draw.line((x-radius, y-radius, x+radius, y+radius), fill="#FF2020", width=3)
+            draw.line((x-radius, y+radius, x+radius, y-radius), fill="#FF2020", width=3)
+        return marked
+
+    def _update_sample_label(self):
+        if hasattr(self, "sample_count_label"):
+            self.sample_count_label.configure(
+                text=f"Positivi: {len(self.positive_samples)} | Negativi: {len(self.negative_samples)}")
+
+    def clear_samples(self):
+        self.positive_samples.clear()
+        self.negative_samples.clear()
+        self._update_sample_label()
+        if self.source_image is not None:
+            self._set_image("original", self.source_image)
+
+    def _schedule_sample_preview(self):
+        required = 3 if self.sample_model_var.get().startswith("Gradiente") else 1
+        if len(self.positive_samples) < required:
+            return
+        if self.sample_after_id is not None:
+            self.after_cancel(self.sample_after_id)
+        self.sample_after_id = self.after(220, self.start_sample_segmentation)
+
+    def start_sample_segmentation(self):
+        self.sample_after_id = None
+        required = 3 if self.sample_model_var.get().startswith("Gradiente") else 1
+        if self.source_image is None or len(self.positive_samples) < required:
+            messagebox.showwarning("Segmentazione per campioni",
+                                   f"Aggiungi almeno {required} campioni positivi nella scheda Originale.")
+            return
+        self.progress.start(12)
+        self.status_label.configure(text="Calcolo della regione OKLab dai campioni...")
+        args = (self.source_image.copy(), self.positive_samples.copy(), self.negative_samples.copy(),
+                float(self.sample_tolerance_var.get()), required == 3, float(self.simplify_var.get()))
+        threading.Thread(target=self._sample_worker, args=args, daemon=True).start()
+
+    def _sample_worker(self, image, positive, negative, tolerance, linear, simplify):
+        try:
+            sample = segment_from_samples(
+                image, positive, negative, tolerance=tolerance,
+                linear_gradient=linear, simplify_pixels=simplify)
+            self.events.put(("sample_done", sample))
+        except Exception as exc:
+            self.events.put(("error", exc))
+
     def _poll(self):
         try:
             while True:
@@ -389,6 +490,25 @@ class TraceSheetApp(tk.Tk):
                     token, _exc = payload
                     if token == self.live_token:
                         self.status_label.configure(text="Impossibile aggiornare l'anteprima rapida")
+                elif kind == "sample_done":
+                    sample = payload
+                    self.result = TraceResult(
+                        original=self.source_image.copy(), raster=sample.mask,
+                        skeleton=sample.contour, overlay=sample.overlay,
+                        paths=sample.paths, processing_scale=1.0,
+                        source_size=self.source_image.size,
+                    )
+                    self.prepared_raster = sample.mask
+                    self._set_image("raster", sample.mask)
+                    self._set_image("skeleton", sample.contour)
+                    self._set_image("overlay", sample.overlay)
+                    self.summary.configure(
+                        text=f"Regione: {sample.accepted_pixels:,} px | {len(sample.paths)} contorni chiusi")
+                    self.status_label.configure(
+                        text="Regione OKLab pronta. Aggiungi campioni o regola la tolleranza.")
+                    self.raster_toolbar.configure(state="normal")
+                    self.dxf_toolbar.configure(state="normal")
+                    self.notebook.select(3)
                 elif kind == "prepared":
                     self.prepared_raster, scale, self.prepared_settings = payload
                     self.result = None
@@ -428,6 +548,10 @@ class TraceSheetApp(tk.Tk):
         width, height = max(100, label.winfo_width() - 12), max(100, label.winfo_height() - 12)
         preview = image.copy()
         preview.thumbnail((width, height), Image.Resampling.LANCZOS)
+        scale = preview.width / image.width
+        offset_x = max(0, (label.winfo_width() - preview.width) // 2)
+        offset_y = max(0, (label.winfo_height() - preview.height) // 2)
+        self.preview_geometry[key] = (offset_x, offset_y, preview.width, preview.height, scale)
         photo = ImageTk.PhotoImage(preview)
         self.preview_refs[key] = photo
         label.configure(image=photo, text="")
