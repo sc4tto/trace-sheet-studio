@@ -5,7 +5,12 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.4.2-test**.
+Versione corrente: **0.5.0-test**.
+
+La modalità **Flussi direzionali** usa un tensore di struttura locale per stimare
+le direzioni dominanti e unisce i frammenti compatibili in direttrici più lunghe.
+L'anteprima in tempo reale mostra ora anche le geometrie vettoriali sovrapposte
+all'immagine prima dell'esportazione DXF.
 
 ## Funzioni del primo prototipo
 

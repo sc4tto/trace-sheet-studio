@@ -4,8 +4,8 @@ import numpy as np
 import ezdxf
 from PIL import Image, ImageDraw
 
-from tracesheet.engine import (TraceResult, TraceSettings, prepare_raster, segment_from_samples,
-                               skeletonize, trace_image)
+from tracesheet.engine import (TraceResult, TraceSettings, merge_coherent_paths, prepare_raster,
+                               segment_from_samples, skeletonize, trace_image)
 from tracesheet.exporters import export_dxf
 
 
@@ -101,3 +101,24 @@ def test_sample_segmentation_keeps_largest_and_exports(tmp_path: Path):
     entities = document.modelspace().query("LWPOLYLINE")
     assert len(entities) == 1
     assert entities[0].closed
+
+
+def test_coherent_fragments_merge_into_one_generator():
+    paths = [[(5.0, 20.0), (35.0, 20.5)], [(42.0, 21.0), (80.0, 21.5)]]
+    merged = merge_coherent_paths(paths, maximum_gap=12, maximum_angle=8)
+    assert len(merged) == 1
+    assert len(merged[0]) == 2
+
+
+def test_directional_flow_mode_returns_vector_paths():
+    image = Image.new("RGB", (180, 100), "white")
+    draw = ImageDraw.Draw(image)
+    for y in (35, 42, 49, 56):
+        draw.line((15, y, 165, y + 5), fill="#3b2418", width=2)
+    result = trace_image(
+        image, TraceSettings(recognition_mode="flows", blur_radius=0.8,
+                             min_path_pixels=5, flow_coherence=0.25,
+                             flow_gap=20, flow_angle=12),
+    )
+    assert result.paths
+    assert result.overlay.size == image.size

@@ -166,7 +166,7 @@ class TraceSheetApp(tk.Tk):
         ttk.Label(box, text="Motore").grid(row=0, column=0, sticky="w")
         self.recognition_var = tk.StringVar(value="Ibrido")
         recognition_combo = ttk.Combobox(box, state="readonly", textvariable=self.recognition_var,
-                                         values=["Monolinea", "Rette", "Curve morbide", "Ibrido"], width=14)
+                                         values=["Monolinea", "Rette", "Curve morbide", "Ibrido", "Flussi direzionali"], width=18)
         recognition_combo.grid(row=0, column=1, sticky="e")
         recognition_combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_live_preview())
         self.minimum_var = tk.IntVar(value=8)
@@ -175,9 +175,15 @@ class TraceSheetApp(tk.Tk):
         self._row_scale(box, 2, "Semplificazione", self.simplify_var, 0.0, 8.0)
         self.line_tolerance_var = tk.DoubleVar(value=1.5)
         self._row_scale(box, 3, "Tolleranza rette", self.line_tolerance_var, 0.2, 6.0)
+        self.flow_coherence_var = tk.DoubleVar(value=0.42)
+        self._row_scale(box, 4, "Coerenza flusso", self.flow_coherence_var, 0.1, 0.9)
+        self.flow_gap_var = tk.DoubleVar(value=18.0)
+        self._row_scale(box, 5, "Unione frammenti", self.flow_gap_var, 2.0, 60.0)
+        self.flow_angle_var = tk.DoubleVar(value=18.0)
+        self._row_scale(box, 6, "Angolo massimo", self.flow_angle_var, 3.0, 45.0)
         self.mm_var = tk.DoubleVar(value=1.0)
-        ttk.Label(box, text="Scala (mm per pixel)").grid(row=4, column=0, sticky="w", pady=(6, 0))
-        ttk.Spinbox(box, from_=0.001, to=1000, increment=0.01, textvariable=self.mm_var, width=10).grid(row=4, column=1, sticky="e", pady=(6, 0))
+        ttk.Label(box, text="Scala (mm per pixel)").grid(row=7, column=0, sticky="w", pady=(6, 0))
+        ttk.Spinbox(box, from_=0.001, to=1000, increment=0.01, textvariable=self.mm_var, width=10).grid(row=7, column=1, sticky="e", pady=(6, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="5. Elaborazione", padding=7)
@@ -325,7 +331,8 @@ class TraceSheetApp(tk.Tk):
     def _settings(self):
         threshold_modes = {"Manuale": "manual", "Otsu automatica": "otsu", "Sauvola locale": "sauvola"}
         recognition_modes = {"Monolinea": "centerline", "Rette": "lines",
-                             "Curve morbide": "curves", "Ibrido": "hybrid"}
+                             "Curve morbide": "curves", "Ibrido": "hybrid",
+                             "Flussi direzionali": "flows"}
         threshold_mode = threshold_modes[self.threshold_mode_var.get()]
         return TraceSettings(
             mode="contours" if self.mode_var.get() == "Contorni delle sagome" else "centerline",
@@ -337,6 +344,9 @@ class TraceSheetApp(tk.Tk):
             min_path_pixels=round(self.minimum_var.get()), simplify_pixels=float(self.simplify_var.get()),
             recognition_mode=recognition_modes[self.recognition_var.get()],
             line_tolerance=float(self.line_tolerance_var.get()),
+            flow_coherence=float(self.flow_coherence_var.get()),
+            flow_gap=float(self.flow_gap_var.get()),
+            flow_angle=float(self.flow_angle_var.get()),
             colors=round(self.colors_var.get()),
             region_color_radius=round(self.region_color_var.get()),
             min_region_area=round(self.min_region_var.get()),
@@ -367,15 +377,18 @@ class TraceSheetApp(tk.Tk):
             return
         self.live_token += 1
         token = self.live_token
-        maximum = 650 if self.mode_var.get() == "Contorni delle sagome" else 900
+        if self.recognition_var.get() == "Flussi direzionali":
+            maximum = 450
+        else:
+            maximum = 600 if self.mode_var.get() == "Contorni delle sagome" else 750
         settings = replace(self._settings(), max_dimension=maximum)
         image = self.source_image.copy()
         threading.Thread(target=self._live_worker, args=(token, image, settings), daemon=True).start()
 
     def _live_worker(self, token, image, settings):
         try:
-            raster, _mask, scale = prepare_raster(image, settings)
-            self.events.put(("live", (token, raster, scale, settings)))
+            result = trace_image(image, settings)
+            self.events.put(("live", (token, result, settings)))
         except Exception as exc:
             self.events.put(("live_error", (token, exc)))
 
@@ -498,21 +511,23 @@ class TraceSheetApp(tk.Tk):
                     messagebox.showerror("Ricalco", str(payload))
                     self.status_label.configure(text="Errore durante il ricalco")
                 elif kind == "live":
-                    token, raster, scale, settings = payload
+                    token, result, settings = payload
                     if token != self.live_token:
                         continue
-                    self._set_image("raster", raster)
+                    self._set_image("raster", result.raster)
+                    self._set_image("skeleton", result.skeleton)
+                    self._set_image("overlay", result.overlay)
                     if settings.mode == "contours":
                         description = f"Regioni {settings.colors} colori | area ≥ {settings.min_region_area} px"
                     else:
-                        black = 100.0 * raster.histogram()[0] / (raster.width * raster.height)
+                        black = 100.0 * result.raster.histogram()[0] / (result.raster.width * result.raster.height)
                         description = settings.threshold_mode.capitalize()
                         if settings.threshold_mode == "manual":
                             description += f" {settings.threshold}"
                         description += f" | nero {black:.1f}%"
-                    self.summary.configure(text=f"{description} | anteprima {scale:.3f}")
-                    self.status_label.configure(text="Anteprima raster aggiornata in tempo reale.")
-                    self.notebook.select(1)
+                    self.summary.configure(text=f"{description} | {len(result.paths):,} vettori | anteprima {result.processing_scale:.3f}")
+                    self.status_label.configure(text="Anteprima raster e vettoriale aggiornata in tempo reale.")
+                    self.notebook.select(3)
                 elif kind == "live_error":
                     token, _exc = payload
                     if token == self.live_token:

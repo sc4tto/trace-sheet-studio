@@ -28,6 +28,10 @@ class TraceSettings:
     simplify_pixels: float = 1.5
     recognition_mode: str = "hybrid"
     line_tolerance: float = 1.5
+    flow_window: int = 19
+    flow_coherence: float = 0.42
+    flow_gap: float = 18.0
+    flow_angle: float = 18.0
     colors: int = 8
     region_spatial_radius: int = 12
     region_color_radius: int = 28
@@ -548,6 +552,89 @@ def recognize_paths(paths: list[list[tuple[float, float]]], mode: str,
     return recognized
 
 
+def _path_axis(path: list[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray, float]:
+    values = np.asarray(path, dtype=float)
+    center = values.mean(axis=0)
+    if len(values) < 2:
+        return center, np.array([1.0, 0.0]), 0.0
+    _u, _s, axes = np.linalg.svd(values - center, full_matrices=False)
+    direction = axes[0]
+    projections = (values - center) @ direction
+    return center, direction, float(projections.max(initial=0.0) - projections.min(initial=0.0))
+
+
+def merge_coherent_paths(paths: list[list[tuple[float, float]]], maximum_gap: float,
+                         maximum_angle: float, lateral_tolerance: float = 7.0
+                         ) -> list[list[tuple[float, float]]]:
+    """Join nearby fragments that belong to one dominant generating direction."""
+    groups = [list(path) for path in paths if len(path) >= 2]
+    angle_limit = np.deg2rad(max(1.0, maximum_angle))
+    changed = True
+    while changed:
+        changed = False
+        best: tuple[float, int, int] | None = None
+        for i, first in enumerate(groups):
+            center_a, axis_a, _length_a = _path_axis(first)
+            for j in range(i + 1, len(groups)):
+                second = groups[j]
+                center_b, axis_b, _length_b = _path_axis(second)
+                angle = np.arccos(np.clip(abs(float(axis_a @ axis_b)), 0.0, 1.0))
+                if angle > angle_limit:
+                    continue
+                delta = center_b - center_a
+                lateral = abs(float(delta[0] * axis_a[1] - delta[1] * axis_a[0]))
+                if lateral > lateral_tolerance:
+                    continue
+                endpoints_a = np.asarray([first[0], first[-1]], dtype=float)
+                endpoints_b = np.asarray([second[0], second[-1]], dtype=float)
+                gap = float(np.linalg.norm(endpoints_a[:, None, :] - endpoints_b[None, :, :], axis=2).min())
+                if gap <= maximum_gap and (best is None or gap < best[0]):
+                    best = (gap, i, j)
+        if best is not None:
+            _gap, i, j = best
+            combined = groups[i] + groups[j]
+            center, direction, _length = _path_axis(combined)
+            values = np.asarray(combined, dtype=float)
+            projections = (values - center) @ direction
+            order = np.argsort(projections)
+            groups[i] = [tuple(point) for point in values[order]]
+            groups.pop(j)
+            changed = True
+    result: list[list[tuple[float, float]]] = []
+    for group in groups:
+        fitted = _fit_line(group, max(lateral_tolerance, 0.5))
+        result.append(fitted if fitted is not None else _smooth_curve(_rdp(group, 1.5), 1))
+    return result
+
+
+def _directional_flow_paths(image: Image.Image, settings: TraceSettings
+                            ) -> tuple[Image.Image, np.ndarray, list[list[tuple[float, float]]]]:
+    """Estimate a structure-tensor field and condense coherent responses into stream paths."""
+    if cv2 is None:
+        raise RuntimeError("Il motore a flussi richiede opencv-python-headless.")
+    gray = np.asarray(ImageOps.grayscale(image), dtype=np.uint8)
+    gray = cv2.GaussianBlur(gray, (0, 0), max(0.8, float(settings.blur_radius)))
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    window = max(5, int(settings.flow_window) | 1)
+    jxx = cv2.boxFilter(gx * gx, -1, (window, window), normalize=True)
+    jyy = cv2.boxFilter(gy * gy, -1, (window, window), normalize=True)
+    jxy = cv2.boxFilter(gx * gy, -1, (window, window), normalize=True)
+    discriminant = np.sqrt((jxx - jyy) ** 2 + 4.0 * jxy ** 2)
+    coherence = discriminant / (jxx + jyy + 1e-6)
+    magnitude = cv2.magnitude(gx, gy)
+    nonzero = magnitude[magnitude > 0]
+    threshold = float(np.percentile(nonzero, 68)) if nonzero.size else 0.0
+    candidate = (coherence >= float(settings.flow_coherence)) & (magnitude >= threshold)
+    candidate = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_CLOSE,
+                                 np.ones((3, 3), np.uint8)).astype(bool)
+    thin = skeletonize(candidate)
+    paths = skeleton_to_paths(thin, settings.min_path_pixels, settings.simplify_pixels)
+    paths = merge_coherent_paths(paths, settings.flow_gap, settings.flow_angle)
+    raster = Image.fromarray(np.where(candidate, 0, 255).astype(np.uint8), mode="L")
+    return raster, thin, paths
+
+
 def _overlay(original: Image.Image, paths: Iterable[Iterable[tuple[float, float]]], scale: float) -> Image.Image:
     from PIL import ImageDraw
 
@@ -570,6 +657,9 @@ def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
         paths = _region_paths(labels, settings.min_region_area, settings.simplify_pixels)
         if settings.recognition_mode in {"curves", "hybrid"}:
             paths = [_smooth_curve(path) for path in paths]
+    elif settings.recognition_mode == "flows":
+        work, scale = _resize_for_processing(original, settings.max_dimension)
+        raster, thin, paths = _directional_flow_paths(work, settings)
     else:
         raster, mask, scale = prepare_raster(original, settings)
         thin = skeletonize(mask)
