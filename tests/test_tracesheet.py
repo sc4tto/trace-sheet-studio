@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import ezdxf
 from PIL import Image, ImageDraw
 
 from tracesheet.engine import (TraceResult, TraceSettings, prepare_raster, segment_from_samples,
@@ -27,6 +28,8 @@ def test_centerline_trace_and_dxf(tmp_path: Path):
     text = output.read_text("ascii")
     assert "LWPOLYLINE" in text
     assert "$INSUNITS" in text
+    document = ezdxf.readfile(output)
+    assert len(document.modelspace().query("LWPOLYLINE")) >= 1
 
 
 def test_contour_mode_finds_color_boundaries():
@@ -94,3 +97,7 @@ def test_sample_segmentation_keeps_largest_and_exports(tmp_path: Path):
     output = tmp_path / "sample.dxf"
     export_dxf(result, output, 1.0)
     assert output.exists()
+    document = ezdxf.readfile(output)
+    entities = document.modelspace().query("LWPOLYLINE")
+    assert len(entities) == 1
+    assert entities[0].closed

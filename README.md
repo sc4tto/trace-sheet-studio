@@ -5,7 +5,7 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.4.1-test**.
+Versione corrente: **0.4.2-test**.
 
 ## Funzioni del primo prototipo
 
@@ -30,6 +30,7 @@ Versione corrente: **0.4.1-test**.
 - peso separato della luminosità e della cromaticità;
 - opzioni per la sola componente principale e il riempimento dei fori interni;
 - conferma esplicita dell'esportazione DXF e messaggi diagnostici in caso di errore;
+- DXF R2010 conforme, generato con ezdxf e verificato mediante riapertura automatica;
 - esportazione DXF ASCII con `LWPOLYLINE`, unità in millimetri e livello `RICALCO`.
 
 ## Avvio dal sorgente

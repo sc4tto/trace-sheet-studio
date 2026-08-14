@@ -6,7 +6,7 @@ root = Path(SPECPATH)
 a = Analysis(
     [str(root / "main.py")],
     pathex=[str(root)],
-    binaries=[], datas=[], hiddenimports=["PIL._tkinter_finder"],
+    binaries=[], datas=[], hiddenimports=["PIL._tkinter_finder", "ezdxf"],
     hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=["pytest"], noarchive=False,
 )
 pyz = PYZ(a.pure)

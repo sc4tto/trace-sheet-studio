@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import ezdxf
 from PIL import Image
 
 from .engine import TraceResult
@@ -12,25 +13,33 @@ def export_raster(image: Image.Image, path: str | Path) -> None:
 
 
 def export_dxf(result: TraceResult, path: str | Path, mm_per_pixel: float = 1.0) -> None:
-    """Write a small ASCII DXF using standard LWPOLYLINE entities."""
+    """Write a standards-compliant R2010 DXF using closed LWPOLYLINE entities."""
     if not result.paths:
         raise ValueError("Il risultato non contiene contorni vettoriali da esportare.")
     if mm_per_pixel <= 0:
         raise ValueError("La scala in millimetri per pixel deve essere maggiore di zero.")
     source_height = result.source_size[1]
     factor = mm_per_pixel / result.processing_scale
-    lines = [
-        "0", "SECTION", "2", "HEADER", "9", "$ACADVER", "1", "AC1015",
-        "9", "$INSUNITS", "70", "4", "0", "ENDSEC",
-        "0", "SECTION", "2", "TABLES", "0", "ENDSEC",
-        "0", "SECTION", "2", "ENTITIES",
-    ]
+    document = ezdxf.new("R2010", setup=True)
+    document.units = ezdxf.units.MM
+    if "RICALCO" not in document.layers:
+        document.layers.add("RICALCO", color=1)
+    modelspace = document.modelspace()
+    exported = 0
     for points in result.paths:
         if len(points) < 2:
             continue
-        lines.extend(["0", "LWPOLYLINE", "100", "AcDbEntity", "8", "RICALCO",
-                      "100", "AcDbPolyline", "90", str(len(points)), "70", "0"])
-        for x, y in points:
-            lines.extend(["10", f"{x * factor:.6f}", "20", f"{(source_height - y / result.processing_scale) * mm_per_pixel:.6f}"])
-    lines.extend(["0", "ENDSEC", "0", "EOF"])
-    Path(path).write_text("\n".join(lines) + "\n", encoding="ascii")
+        closed = len(points) >= 3 and points[0] == points[-1]
+        vertices = points[:-1] if closed else points
+        coordinates = [
+            (float(x * factor), float((source_height - y / result.processing_scale) * mm_per_pixel))
+            for x, y in vertices
+        ]
+        if len(coordinates) < 2:
+            continue
+        modelspace.add_lwpolyline(coordinates, close=closed, dxfattribs={"layer": "RICALCO"})
+        exported += 1
+    if exported == 0:
+        raise ValueError("Nessun contorno valido è stato trovato per l'esportazione.")
+    document.header["$INSUNITS"] = 4
+    document.saveas(Path(path))
