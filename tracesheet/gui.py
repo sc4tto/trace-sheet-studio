@@ -150,15 +150,19 @@ class TraceSheetApp(tk.Tk):
         invert_check = ttk.Checkbutton(box, text="Inverti bianco/nero", variable=self.invert_var,
                                        command=self._schedule_live_preview)
         invert_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.colors_var = tk.IntVar(value=8)
+        self.colors_var = tk.IntVar(value=20)
         self.colors_row = self._row_scale(box, 7, "Aree cromatiche", self.colors_var, 2, 24)
         self.region_color_var = tk.IntVar(value=28)
         self.region_color_row = self._row_scale(box, 8, "Differenza colore", self.region_color_var, 5, 80)
-        self.min_region_var = tk.IntVar(value=100)
+        self.min_region_var = tk.IntVar(value=80)
         self.min_region_row = self._row_scale(box, 9, "Area minima", self.min_region_var, 10, 2000)
+        self.texture_suppression_var = tk.IntVar(value=13)
+        self.texture_row = self._row_scale(box, 10, "Soppressione texture", self.texture_suppression_var, 1, 31)
+        self.region_merge_var = tk.DoubleVar(value=7.0)
+        self.region_merge_row = self._row_scale(box, 11, "Fusione aree", self.region_merge_var, 0.0, 35.0)
         self.live_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(box, text="Anteprima in tempo reale", variable=self.live_var,
-                        command=self._schedule_live_preview).grid(row=10, column=0, columnspan=2, sticky="w", pady=(5, 0))
+                        command=self._schedule_live_preview).grid(row=12, column=0, columnspan=2, sticky="w", pady=(5, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="4. Geometria", padding=7)
@@ -168,19 +172,20 @@ class TraceSheetApp(tk.Tk):
         recognition_combo = ttk.Combobox(box, state="readonly", textvariable=self.recognition_var,
                                          values=["Monolinea", "Rette", "Curve morbide", "Ibrido", "Flussi direzionali"], width=18)
         recognition_combo.grid(row=0, column=1, sticky="e")
+        self.recognition_combo = recognition_combo
         recognition_combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_live_preview())
         self.minimum_var = tk.IntVar(value=8)
         self._row_scale(box, 1, "Tratto minimo (px)", self.minimum_var, 2, 80)
         self.simplify_var = tk.DoubleVar(value=1.5)
         self._row_scale(box, 2, "Semplificazione", self.simplify_var, 0.0, 8.0)
         self.line_tolerance_var = tk.DoubleVar(value=1.5)
-        self._row_scale(box, 3, "Tolleranza rette", self.line_tolerance_var, 0.2, 6.0)
+        self.line_tolerance_row = self._row_scale(box, 3, "Tolleranza rette", self.line_tolerance_var, 0.2, 6.0)
         self.flow_coherence_var = tk.DoubleVar(value=0.42)
-        self._row_scale(box, 4, "Coerenza flusso", self.flow_coherence_var, 0.1, 0.9)
+        self.flow_coherence_row = self._row_scale(box, 4, "Coerenza flusso", self.flow_coherence_var, 0.1, 0.9)
         self.flow_gap_var = tk.DoubleVar(value=18.0)
-        self._row_scale(box, 5, "Unione frammenti", self.flow_gap_var, 2.0, 60.0)
+        self.flow_gap_row = self._row_scale(box, 5, "Unione frammenti", self.flow_gap_var, 2.0, 60.0)
         self.flow_angle_var = tk.DoubleVar(value=18.0)
-        self._row_scale(box, 6, "Angolo massimo", self.flow_angle_var, 3.0, 45.0)
+        self.flow_angle_row = self._row_scale(box, 6, "Angolo massimo", self.flow_angle_var, 3.0, 45.0)
         self.mm_var = tk.DoubleVar(value=1.0)
         ttk.Label(box, text="Scala (mm per pixel)").grid(row=7, column=0, sticky="w", pady=(6, 0))
         ttk.Spinbox(box, from_=0.001, to=1000, increment=0.01, textvariable=self.mm_var, width=10).grid(row=7, column=1, sticky="e", pady=(6, 0))
@@ -290,13 +295,20 @@ class TraceSheetApp(tk.Tk):
         self.mode_help.configure(text=("Per intarsi, campiture e confini fra aree cromatiche."
                                        if contours else "Per planimetrie, aste e disegni tecnici."))
         state = "normal" if contours else "disabled"
-        for row in (self.colors_row, self.region_color_row, self.min_region_row):
+        for row in (self.colors_row, self.region_color_row, self.min_region_row,
+                    self.texture_row, self.region_merge_row):
             for widget in row:
                 widget.configure(state=state)
         if contours and self.blur_var.get() < 2.0:
             self.blur_var.set(2.0)
         elif not contours and self.blur_var.get() > 1.5:
             self.blur_var.set(0.6)
+        self.recognition_combo.configure(state="disabled" if contours else "readonly")
+        for row in (self.line_tolerance_row, self.flow_coherence_row, self.flow_gap_row):
+            for widget in row:
+                widget.configure(state="disabled" if contours else "normal")
+        for widget in self.flow_angle_row:
+            widget.configure(state="normal")
         self._schedule_live_preview()
 
     def about(self):
@@ -350,6 +362,9 @@ class TraceSheetApp(tk.Tk):
             colors=round(self.colors_var.get()),
             region_color_radius=round(self.region_color_var.get()),
             min_region_area=round(self.min_region_var.get()),
+            texture_suppression=round(self.texture_suppression_var.get()),
+            region_merge_delta=float(self.region_merge_var.get()),
+            generator_angle=float(self.flow_angle_var.get()),
         )
 
     def _schedule_live_preview(self, immediate=False):
@@ -518,7 +533,9 @@ class TraceSheetApp(tk.Tk):
                     self._set_image("skeleton", result.skeleton)
                     self._set_image("overlay", result.overlay)
                     if settings.mode == "contours":
-                        description = f"Regioni {settings.colors} colori | area ≥ {settings.min_region_area} px"
+                        layer_count = len(result.vector_layers.get("01_TESSERE_CHIUSE", [])) if result.vector_layers else 0
+                        description = (f"{layer_count} tessere | fusione {settings.region_merge_delta:.1f}"
+                                       f" | texture {settings.texture_suppression}")
                     else:
                         black = 100.0 * result.raster.histogram()[0] / (result.raster.width * result.raster.height)
                         description = settings.threshold_mode.capitalize()

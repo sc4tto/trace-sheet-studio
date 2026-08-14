@@ -5,7 +5,12 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.5.0-test**.
+Versione corrente: **0.6.0-test**.
+
+La ricostruzione delle sagome produce ora un grafo di bordi condivisi: ogni
+separazione fisica è trasformata in un asse unico e i frammenti tangenti vengono
+concatenati in curve generatrici massimali. Il DXF separa tessere chiuse, curve
+generatrici, perimetro e venature su layer distinti.
 
 La modalità **Flussi direzionali** usa un tensore di struttura locale per stimare
 le direzioni dominanti e unisce i frammenti compatibili in direttrici più lunghe.

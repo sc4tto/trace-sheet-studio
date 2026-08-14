@@ -38,7 +38,10 @@ def test_contour_mode_finds_color_boundaries():
     result = trace_image(image, TraceSettings(mode="contours", colors=3, blur_radius=0, min_path_pixels=3))
     assert result.paths
     assert result.raster.mode == "RGB"
-    assert all(path[0] == path[-1] for path in result.paths)
+    assert result.vector_layers
+    assert "02_CURVE_GENERATRICI" in result.vector_layers
+    assert all(path[0] == path[-1]
+               for path in result.vector_layers["01_TESSERE_CHIUSE"])
 
 
 def test_sauvola_handles_uneven_background():
@@ -122,3 +125,26 @@ def test_directional_flow_mode_returns_vector_paths():
     )
     assert result.paths
     assert result.overlay.size == image.size
+
+
+def test_shared_boundaries_export_once_on_separate_layers(tmp_path: Path):
+    image = Image.new("RGB", (150, 90), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 49, 89), fill="#e8c999")
+    draw.rectangle((50, 0, 99, 89), fill="#86502f")
+    draw.rectangle((100, 0, 149, 89), fill="#d89b54")
+    result = trace_image(
+        image, TraceSettings(mode="contours", colors=3, min_region_area=20,
+                             region_merge_delta=2, texture_suppression=3,
+                             min_path_pixels=3, simplify_pixels=1),
+    )
+    assert result.vector_layers
+    generators = result.vector_layers["02_CURVE_GENERATRICI"]
+    assert 1 <= len(generators) <= 4
+    output = tmp_path / "shared.dxf"
+    export_dxf(result, output, 1.0)
+    document = ezdxf.readfile(output)
+    assert "01_TESSERE_CHIUSE" in document.layers
+    assert "02_CURVE_GENERATRICI" in document.layers
+    assert "03_PERIMETRO" in document.layers
+    assert len(document.modelspace().query('*[layer=="02_CURVE_GENERATRICI"]')) == len(generators)

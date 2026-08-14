@@ -32,10 +32,13 @@ class TraceSettings:
     flow_coherence: float = 0.42
     flow_gap: float = 18.0
     flow_angle: float = 18.0
-    colors: int = 8
+    colors: int = 20
     region_spatial_radius: int = 12
     region_color_radius: int = 28
-    min_region_area: int = 100
+    min_region_area: int = 80
+    texture_suppression: int = 13
+    region_merge_delta: float = 7.0
+    generator_angle: float = 24.0
     max_dimension: int = 1400
 
 
@@ -48,6 +51,7 @@ class TraceResult:
     paths: list[list[tuple[float, float]]]
     processing_scale: float
     source_size: tuple[int, int]
+    vector_layers: dict[str, list[list[tuple[float, float]]]] | None = None
 
 
 @dataclass
@@ -156,11 +160,76 @@ def _merge_small_regions(labels: np.ndarray, minimum_area: int) -> np.ndarray:
     return cleaned
 
 
+def _connected_region_ids(labels: np.ndarray) -> np.ndarray:
+    """Give every connected color patch its own id before local graph merging."""
+    regions = np.zeros(labels.shape, dtype=np.int32)
+    next_id = 0
+    for label_id in np.unique(labels):
+        count, components = cv2.connectedComponents((labels == label_id).astype(np.uint8), 8)
+        for component_id in range(1, count):
+            regions[components == component_id] = next_id
+            next_id += 1
+    return regions
+
+
+def _merge_adjacent_regions(regions: np.ndarray, lab: np.ndarray,
+                            maximum_delta: float) -> np.ndarray:
+    """Merge adjacent patches with compatible mean OKLab-like (CIELAB) color."""
+    count = int(regions.max(initial=-1)) + 1
+    if count <= 1 or maximum_delta <= 0:
+        return regions
+    flat_regions = regions.ravel()
+    sizes = np.bincount(flat_regions, minlength=count).astype(np.float64)
+    sums = np.stack([
+        np.bincount(flat_regions, weights=lab[..., channel].ravel(), minlength=count)
+        for channel in range(3)
+    ], axis=1)
+    means = sums / np.maximum(1.0, sizes[:, None])
+    pairs = []
+    for first, second in ((regions[:, :-1], regions[:, 1:]),
+                          (regions[:-1, :], regions[1:, :])):
+        different = first != second
+        if np.any(different):
+            pair = np.sort(np.column_stack([first[different], second[different]]), axis=1)
+            pairs.append(pair)
+    if not pairs:
+        return regions
+    adjacency = np.unique(np.vstack(pairs), axis=0)
+    parent = np.arange(count, dtype=np.int32)
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = int(parent[value])
+        return value
+
+    candidates: list[tuple[float, int, int]] = []
+    for first, second in adjacency:
+        # OpenCV Lab uses 0..255 channels; scale to approximately perceptual Delta-E.
+        delta = float(np.linalg.norm((means[first] - means[second]) * np.array([100/255, 1, 1])))
+        candidates.append((delta, int(first), int(second)))
+    for delta, first, second in sorted(candidates):
+        if delta > maximum_delta:
+            break
+        root_a, root_b = find(first), find(second)
+        if root_a != root_b:
+            parent[root_b] = root_a
+    roots = np.array([find(index) for index in range(count)], dtype=np.int32)
+    _unique, dense = np.unique(roots, return_inverse=True)
+    return dense[regions]
+
+
 def _segment_regions(image: Image.Image, settings: TraceSettings) -> tuple[Image.Image, np.ndarray, np.ndarray]:
     if cv2 is None:
         raise RuntimeError("La modalità a sagome richiede opencv-python-headless.")
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    texture = max(1, int(settings.texture_suppression) | 1)
+    if texture > 1:
+        bgr = cv2.bilateralFilter(
+            bgr, d=texture, sigmaColor=max(10, settings.region_color_radius),
+            sigmaSpace=max(2, texture),
+        )
     filtered = cv2.pyrMeanShiftFiltering(
         bgr,
         sp=max(2, int(settings.region_spatial_radius)),
@@ -181,7 +250,16 @@ def _segment_regions(image: Image.Image, settings: TraceSettings) -> tuple[Image
     )
     labels = labels.reshape(lab.shape[:2]).astype(np.int32)
     labels = _merge_small_regions(labels, max(1, int(settings.min_region_area)))
-    lab_segmented = centers[np.clip(labels, 0, len(centers) - 1)].astype(np.uint8)
+    labels = _connected_region_ids(labels)
+    labels = _merge_adjacent_regions(labels, lab, float(settings.region_merge_delta))
+    region_count = int(labels.max(initial=-1)) + 1
+    flat = labels.ravel()
+    sizes = np.bincount(flat, minlength=region_count)
+    region_means = np.stack([
+        np.bincount(flat, weights=lab[..., channel].ravel(), minlength=region_count)
+        for channel in range(3)
+    ], axis=1) / np.maximum(1, sizes[:, None])
+    lab_segmented = region_means[labels].astype(np.uint8)
     segmented = cv2.cvtColor(lab_segmented, cv2.COLOR_LAB2RGB)
     boundary = _label_boundaries(labels)
     return Image.fromarray(segmented, mode="RGB"), labels, boundary
@@ -607,6 +685,84 @@ def merge_coherent_paths(paths: list[list[tuple[float, float]]], maximum_gap: fl
     return result
 
 
+def _join_boundary_strokes(paths: list[list[tuple[float, float]]], maximum_angle: float,
+                           maximum_gap: float = 3.0) -> list[list[tuple[float, float]]]:
+    """Pair tangent-compatible half-edges and form maximal curves through junctions."""
+    strokes = [list(path) for path in paths if len(path) >= 2]
+    angle_limit = np.deg2rad(max(1.0, maximum_angle))
+    cell = max(1.0, maximum_gap)
+    for _pass in range(16):
+        buckets: dict[tuple[int, int], list[tuple[int, bool, np.ndarray, np.ndarray]]] = {}
+        for index, stroke in enumerate(strokes):
+            for at_start in (True, False):
+                endpoint = np.asarray(stroke[0] if at_start else stroke[-1], dtype=float)
+                inner = np.asarray(stroke[min(3, len(stroke)-1)] if at_start
+                                   else stroke[max(0, len(stroke)-4)], dtype=float)
+                inward = inner - endpoint
+                norm = float(np.linalg.norm(inward))
+                if norm == 0:
+                    continue
+                key = (int(np.floor(endpoint[0] / cell)), int(np.floor(endpoint[1] / cell)))
+                buckets.setdefault(key, []).append((index, at_start, endpoint, inward / norm))
+        candidates: list[tuple[float, float, int, int, bool, bool]] = []
+        seen: set[tuple[int, int, bool, bool]] = set()
+        for key, records in buckets.items():
+            nearby = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    nearby.extend(buckets.get((key[0] + dx, key[1] + dy), []))
+            for first in records:
+                for second in nearby:
+                    i, start_a, point_a, inward_a = first
+                    j, start_b, point_b, inward_b = second
+                    if i >= j:
+                        continue
+                    identity = (i, j, start_a, start_b)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    gap = float(np.linalg.norm(point_a - point_b))
+                    if gap > maximum_gap:
+                        continue
+                    angle = float(np.arccos(np.clip(-(inward_a @ inward_b), -1.0, 1.0)))
+                    if angle <= angle_limit:
+                        candidates.append((angle + gap * 0.02, gap, i, j, start_a, start_b))
+        used: set[int] = set()
+        selected = []
+        for candidate in sorted(candidates):
+            _score, _gap, i, j, _start_a, _start_b = candidate
+            if i not in used and j not in used:
+                selected.append(candidate)
+                used.update((i, j))
+        if not selected:
+            break
+        merged: list[list[tuple[float, float]]] = []
+        for _score, gap, i, j, start_a, start_b in selected:
+            first = list(reversed(strokes[i])) if start_a else strokes[i]
+            second = strokes[j] if start_b else list(reversed(strokes[j]))
+            merged.append(first + (second[1:] if gap < 0.75 else second))
+        merged.extend(stroke for index, stroke in enumerate(strokes) if index not in used)
+        strokes = merged
+    return strokes
+
+
+def _shared_boundary_generators(labels: np.ndarray, settings: TraceSettings
+                                ) -> tuple[np.ndarray, list[list[tuple[float, float]]]]:
+    boundary = _label_boundaries(labels)
+    thin = skeletonize(boundary)
+    fragments = skeleton_to_paths(
+        thin, max(2, int(settings.min_path_pixels // 2)),
+        max(0.2, float(settings.simplify_pixels) * 0.5),
+    )
+    chains = _join_boundary_strokes(fragments, settings.generator_angle)
+    generators: list[list[tuple[float, float]]] = []
+    for chain in chains:
+        simplified = _rdp(chain, settings.simplify_pixels)
+        if len(simplified) >= 2:
+            generators.append(_smooth_curve(simplified, 1))
+    return thin, generators
+
+
 def _directional_flow_paths(image: Image.Image, settings: TraceSettings
                             ) -> tuple[Image.Image, np.ndarray, list[list[tuple[float, float]]]]:
     """Estimate a structure-tensor field and condense coherent responses into stream paths."""
@@ -651,15 +807,24 @@ def _overlay(original: Image.Image, paths: Iterable[Iterable[tuple[float, float]
 
 def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
     original = image.convert("RGB")
+    vector_layers = None
     if settings.mode == "contours":
         work, scale = _resize_for_processing(original, settings.max_dimension)
-        raster, labels, thin = _segment_regions(work, settings)
-        paths = _region_paths(labels, settings.min_region_area, settings.simplify_pixels)
-        if settings.recognition_mode in {"curves", "hybrid"}:
-            paths = [_smooth_curve(path) for path in paths]
+        raster, labels, _raw_boundary = _segment_regions(work, settings)
+        tile_paths = _region_paths(labels, settings.min_region_area, settings.simplify_pixels)
+        thin, paths = _shared_boundary_generators(labels, settings)
+        perimeter = [[(0.0, 0.0), (float(work.width - 1), 0.0),
+                      (float(work.width - 1), float(work.height - 1)),
+                      (0.0, float(work.height - 1)), (0.0, 0.0)]]
+        vector_layers = {
+            "01_TESSERE_CHIUSE": tile_paths,
+            "02_CURVE_GENERATRICI": paths,
+            "03_PERIMETRO": perimeter,
+        }
     elif settings.recognition_mode == "flows":
         work, scale = _resize_for_processing(original, settings.max_dimension)
         raster, thin, paths = _directional_flow_paths(work, settings)
+        vector_layers = {"04_VENATURE": paths}
     else:
         raster, mask, scale = prepare_raster(original, settings)
         thin = skeletonize(mask)
@@ -674,4 +839,5 @@ def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
         paths=paths,
         processing_scale=scale,
         source_size=original.size,
+        vector_layers=vector_layers,
     )
