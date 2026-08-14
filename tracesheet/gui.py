@@ -159,16 +159,24 @@ class TraceSheetApp(tk.Tk):
         self.region_color_row = self._row_scale(box, 8, "Differenza colore", self.region_color_var, 5, 80)
         self.min_region_var = tk.IntVar(value=80)
         self.min_region_row = self._row_scale(box, 9, "Area minima", self.min_region_var, 10, 2000)
-        self.texture_suppression_var = tk.IntVar(value=13)
+        self.texture_suppression_var = tk.IntVar(value=17)
         self.texture_row = self._row_scale(box, 10, "Soppressione texture", self.texture_suppression_var, 1, 31)
         self.region_merge_var = tk.DoubleVar(value=7.0)
         self.region_merge_row = self._row_scale(box, 11, "Fusione aree", self.region_merge_var, 0.0, 35.0)
-        self.structural_strength_var = tk.DoubleVar(value=0.62)
+        self.structural_strength_var = tk.DoubleVar(value=0.50)
         self.structural_row = self._row_scale(
             box, 12, "Persistenza strutturale", self.structural_strength_var, 0.05, 0.95)
+        ttk.Label(box, text="Vista strutturale").grid(row=13, column=0, sticky="w", pady=(4, 0))
+        self.structural_view_var = tk.StringVar(value="Solo primarie")
+        self.structural_view_combo = ttk.Combobox(
+            box, state="readonly", textvariable=self.structural_view_var,
+            values=["Solo primarie", "Primarie + secondarie", "Probabilità"], width=19)
+        self.structural_view_combo.grid(row=13, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(4, 0))
+        self.structural_view_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._schedule_live_preview())
         self.live_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(box, text="Anteprima in tempo reale", variable=self.live_var,
-                        command=self._schedule_live_preview).grid(row=13, column=0, columnspan=3, sticky="w", pady=(5, 0))
+                        command=self._schedule_live_preview).grid(row=14, column=0, columnspan=3, sticky="w", pady=(5, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="4. Geometria", padding=7)
@@ -180,17 +188,17 @@ class TraceSheetApp(tk.Tk):
         recognition_combo.grid(row=0, column=1, sticky="e")
         self.recognition_combo = recognition_combo
         recognition_combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_live_preview())
-        self.minimum_var = tk.IntVar(value=12)
+        self.minimum_var = tk.IntVar(value=10)
         self._row_scale(box, 1, "Tratto minimo (px)", self.minimum_var, 2, 80)
-        self.simplify_var = tk.DoubleVar(value=2.0)
+        self.simplify_var = tk.DoubleVar(value=1.5)
         self._row_scale(box, 2, "Semplificazione", self.simplify_var, 0.0, 8.0)
         self.line_tolerance_var = tk.DoubleVar(value=1.5)
         self.line_tolerance_row = self._row_scale(box, 3, "Tolleranza rette", self.line_tolerance_var, 0.2, 6.0)
         self.flow_coherence_var = tk.DoubleVar(value=0.42)
         self.flow_coherence_row = self._row_scale(box, 4, "Coerenza flusso", self.flow_coherence_var, 0.1, 0.9)
-        self.flow_gap_var = tk.DoubleVar(value=18.0)
+        self.flow_gap_var = tk.DoubleVar(value=26.0)
         self.flow_gap_row = self._row_scale(box, 5, "Unione frammenti", self.flow_gap_var, 2.0, 60.0)
-        self.flow_angle_var = tk.DoubleVar(value=18.0)
+        self.flow_angle_var = tk.DoubleVar(value=22.0)
         self.flow_angle_row = self._row_scale(box, 6, "Angolo massimo", self.flow_angle_var, 3.0, 45.0)
         self.mm_var = tk.DoubleVar(value=1.0)
         ttk.Label(box, text="Scala (mm per pixel)").grid(row=7, column=0, sticky="w", pady=(6, 0))
@@ -323,16 +331,17 @@ class TraceSheetApp(tk.Tk):
         self.colors_var.set(20)
         self.region_color_var.set(28)
         self.min_region_var.set(80)
-        self.texture_suppression_var.set(13)
+        self.texture_suppression_var.set(17)
         self.region_merge_var.set(7.0)
-        self.structural_strength_var.set(0.62)
+        self.structural_strength_var.set(0.50)
+        self.structural_view_var.set("Solo primarie")
         self.recognition_var.set("Ibrido")
-        self.minimum_var.set(12)
-        self.simplify_var.set(2.0)
+        self.minimum_var.set(10)
+        self.simplify_var.set(1.5)
         self.line_tolerance_var.set(1.5)
         self.flow_coherence_var.set(0.42)
-        self.flow_gap_var.set(18.0)
-        self.flow_angle_var.set(18.0)
+        self.flow_gap_var.set(26.0)
+        self.flow_angle_var.set(22.0)
         self._mode_changed()
 
     def _threshold_mode_changed(self, schedule=True):
@@ -368,6 +377,7 @@ class TraceSheetApp(tk.Tk):
             widget.configure(state="normal" if contours or structural else "disabled")
         for widget in self.structural_row:
             widget.configure(state="normal" if structural else "disabled")
+        self.structural_view_combo.configure(state="readonly" if structural else "disabled")
         if contours and self.blur_var.get() < 2.0:
             self.blur_var.set(2.0)
         elif not contours and self.blur_var.get() > 1.5:
@@ -422,6 +432,9 @@ class TraceSheetApp(tk.Tk):
                       "Contorni delle sagome": "contours",
                       "Analisi combinata": "combined",
                       "Ricalco strutturale": "structural"}
+        structural_views = {"Solo primarie": "primary",
+                            "Primarie + secondarie": "details",
+                            "Probabilità": "probability"}
         return TraceSettings(
             mode=mode_names[self.mode_var.get()],
             threshold_mode=threshold_mode,
@@ -442,6 +455,7 @@ class TraceSheetApp(tk.Tk):
             region_merge_delta=float(self.region_merge_var.get()),
             generator_angle=float(self.flow_angle_var.get()),
             structural_strength=float(self.structural_strength_var.get()),
+            structural_view=structural_views[self.structural_view_var.get()],
         )
 
     def _schedule_live_preview(self, immediate=False):

@@ -40,6 +40,7 @@ class TraceSettings:
     region_merge_delta: float = 7.0
     generator_angle: float = 24.0
     structural_strength: float = 0.62
+    structural_view: str = "primary"
     max_dimension: int = 1400
 
 
@@ -831,12 +832,37 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1,) * 2)
     supported_large = cv2.dilate(large.astype(np.uint8), kernel).astype(bool)
     supported_medium = cv2.dilate(medium.astype(np.uint8), kernel).astype(bool)
-    primary = medium & supported_large
+    strong = medium & supported_large
     # A boundary present at fine and medium scale is already persistent; this
     # retains narrow assembly seams that may disappear after the widest blur.
-    primary |= fine & supported_medium
+    strong |= fine & supported_medium
     # Very strong large-scale borders remain useful even if the medium response is interrupted.
-    primary |= large & cv2.dilate(medium.astype(np.uint8), kernel).astype(bool)
+    strong |= large & supported_medium
+
+    # Continuous chromatic evidence supplies weak support where a real seam is
+    # partially lost by blur, without automatically promoting wood grain.
+    medium_lab = cv2.GaussianBlur(lab, (0, 0), max(1.2, base))
+    gradient = np.zeros(medium_lab.shape[:2], dtype=np.float32)
+    for channel in range(3):
+        gx = cv2.Sobel(medium_lab[..., channel], cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(medium_lab[..., channel], cv2.CV_32F, 0, 1, ksize=3)
+        gradient += gx * gx + gy * gy
+    gradient = np.sqrt(gradient)
+    positive = gradient[gradient > 0]
+    color_limit = float(np.percentile(positive, 78 + strength * 10)) if positive.size else 0.0
+    color_support = gradient >= color_limit
+    weak = fine | medium | large | color_support
+
+    # Morphological hysteresis: grow only a limited distance from strong seeds.
+    # This reconnects interrupted seams but cannot flood the full texture network.
+    primary = strong.copy()
+    growth_steps = max(2, min(14, round(settings.flow_gap * 0.45)))
+    growth_kernel = np.ones((3, 3), np.uint8)
+    for _ in range(growth_steps):
+        expanded = cv2.dilate(primary.astype(np.uint8), growth_kernel).astype(bool) & weak
+        if np.array_equal(expanded, primary):
+            break
+        primary = expanded
     primary = cv2.morphologyEx(primary.astype(np.uint8), cv2.MORPH_CLOSE,
                                np.ones((3, 3), np.uint8)).astype(bool)
     count, components, stats, _ = cv2.connectedComponentsWithStats(primary.astype(np.uint8), 8)
@@ -861,7 +887,17 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
         secondary_thin, max(settings.min_path_pixels * 2, 12),
         max(settings.simplify_pixels, 1.5))
     raster_array = np.full((*primary.shape, 3), 255, dtype=np.uint8)
-    raster_array[secondary_thin] = (190, 190, 190)
+    view = settings.structural_view.lower()
+    if view == "probability":
+        score = (0.18 * fine.astype(np.float32)
+                 + 0.34 * medium.astype(np.float32)
+                 + 0.34 * large.astype(np.float32))
+        if positive.size:
+            score += 0.28 * np.clip(gradient / max(color_limit, 1e-6), 0.0, 1.0)
+        shade = np.clip(255.0 * (1.0 - score / max(float(score.max()), 1e-6)), 0, 255).astype(np.uint8)
+        raster_array[:] = shade[..., None]
+    elif view == "details":
+        raster_array[secondary_thin] = (190, 190, 190)
     raster_array[primary_thin] = (0, 0, 0)
     return Image.fromarray(raster_array, mode="RGB"), primary_thin, primary_paths, secondary_paths
 

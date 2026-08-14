@@ -5,7 +5,12 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.8.0-test**.
+Versione corrente: **0.8.1-test**.
+
+Il ricalco strutturale usa ora una crescita per isteresi: i bordi forti possono
+recuperare segmenti cromaticamente coerenti entro una distanza limitata senza
+invadere l'intera rete della venatura. La vista raster può mostrare solo le
+primarie, anche le secondarie oppure la probabilità continua del bordo.
 
 La modalità **Ricalco strutturale** confronta i bordi a tre scale: le risposte
 persistenti diventano curve generatrici primarie, mentre i dettagli presenti
