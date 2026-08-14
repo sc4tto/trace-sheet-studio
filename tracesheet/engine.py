@@ -253,6 +253,11 @@ def segment_from_samples(image: Image.Image,
                          tolerance: float = 0.055,
                          linear_gradient: bool = True,
                          edge_weight: float = 0.35,
+                         sample_radius: int = 8,
+                         lightness_weight: float = 0.35,
+                         chroma_weight: float = 1.0,
+                         keep_largest: bool = True,
+                         fill_holes: bool = True,
                          close_gaps: int = 2,
                          simplify_pixels: float = 2.0) -> SampleSegmentationResult:
     """Grow a connected OKLab region from user samples using a fitted local gradient."""
@@ -267,8 +272,26 @@ def segment_from_samples(image: Image.Image,
             np.any(positive[:, 1] < 0) or np.any(positive[:, 1] >= height):
         raise ValueError("Un campione positivo si trova fuori dall'immagine.")
     oklab = _rgb_to_oklab(rgb)
-    sample_colors = oklab[positive[:, 1], positive[:, 0]]
-    design = _sample_design(positive, width, height, linear_gradient)
+    # Each click represents a disk, not a fragile single pixel. Trim chromatic
+    # outliers inside each disk so dark grain streaks do not drive the model.
+    sample_positions: list[tuple[int, int]] = []
+    sample_values: list[np.ndarray] = []
+    radius = max(0, int(sample_radius))
+    yy_disk, xx_disk = np.mgrid[-radius:radius + 1, -radius:radius + 1]
+    disk = xx_disk * xx_disk + yy_disk * yy_disk <= radius * radius
+    for x, y in positive_points:
+        xs = np.clip(x + xx_disk[disk], 0, width - 1)
+        ys = np.clip(y + yy_disk[disk], 0, height - 1)
+        colors = oklab[ys, xs]
+        median = np.median(colors, axis=0)
+        deviations = np.linalg.norm(colors - median, axis=1)
+        limit = np.quantile(deviations, 0.75) if len(deviations) > 3 else deviations.max(initial=0)
+        accepted = deviations <= max(limit, 1e-9)
+        sample_positions.extend(zip(xs[accepted].tolist(), ys[accepted].tolist()))
+        sample_values.extend(colors[accepted])
+    fit_points = np.asarray(sample_positions, dtype=np.float64)
+    sample_colors = np.asarray(sample_values, dtype=np.float64)
+    design = _sample_design(fit_points, width, height, linear_gradient)
     coefficients, *_ = np.linalg.lstsq(design, sample_colors, rcond=None)
     yy, xx = np.mgrid[0:height, 0:width]
     if linear_gradient:
@@ -276,7 +299,11 @@ def segment_from_samples(image: Image.Image,
             + coefficients[2] * (yy[..., None] / max(1, height - 1))
     else:
         expected = np.broadcast_to(coefficients[0], oklab.shape)
-    residual = np.linalg.norm(oklab - expected, axis=2)
+    delta = oklab - expected
+    residual = np.sqrt(
+        max(0.0, lightness_weight) * delta[..., 0] ** 2
+        + max(0.0, chroma_weight) * (delta[..., 1] ** 2 + delta[..., 2] ** 2)
+    )
     luminance = oklab[..., 0]
     gx = np.zeros_like(luminance)
     gy = np.zeros_like(luminance)
@@ -291,9 +318,9 @@ def segment_from_samples(image: Image.Image,
         for x, y in negative_points:
             if 0 <= x < width and 0 <= y < height:
                 candidate[y, x] = False
-                radius = 3
-                candidate[max(0, y-radius):min(height, y+radius+1),
-                          max(0, x-radius):min(width, x+radius+1)] = False
+                negative_radius = max(3, radius)
+                candidate[max(0, y-negative_radius):min(height, y+negative_radius+1),
+                          max(0, x-negative_radius):min(width, x+negative_radius+1)] = False
     seeds = np.zeros((height + 2, width + 2), dtype=np.uint8)
     flood_source = np.where(candidate, 255, 0).astype(np.uint8)
     connected = np.zeros_like(candidate)
@@ -303,9 +330,20 @@ def segment_from_samples(image: Image.Image,
         component = flood_source.copy()
         cv2.floodFill(component, seeds.copy(), (int(x), int(y)), 128)
         connected |= component == 128
+    if keep_largest and np.any(connected):
+        count, components, stats, _ = cv2.connectedComponentsWithStats(connected.astype(np.uint8), 8)
+        if count > 1:
+            largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            connected = components == largest
     if close_gaps > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_gaps * 2 + 1,) * 2)
         connected = cv2.morphologyEx(connected.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
+    if fill_holes and np.any(connected):
+        inverse = (~connected).astype(np.uint8) * 255
+        flood = inverse.copy()
+        cv2.floodFill(flood, np.zeros((height + 2, width + 2), np.uint8), (0, 0), 128)
+        holes = flood == 255
+        connected |= holes
     binary = np.where(connected, 255, 0).astype(np.uint8)
     contours, _hierarchy = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     paths: list[list[tuple[float, float]]] = []
