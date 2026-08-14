@@ -5,7 +5,7 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.3.0-test**.
+Versione corrente: **0.4.0-test**.
 
 ## Funzioni del primo prototipo
 
@@ -23,6 +23,9 @@ Versione corrente: **0.3.0-test**.
 - segmentazione degli intarsi in spazio colore Lab tramite Mean Shift e clustering;
 - fusione delle piccole regioni e controllo dell'area minima;
 - contorni chiusi delle tessere, pronti per l'esportazione DXF;
+- segmentazione assistita mediante campioni positivi e negativi;
+- modello OKLab a colore medio o gradiente lineare 2D;
+- crescita connessa della regione e aggiornamento della tolleranza;
 - esportazione DXF ASCII con `LWPOLYLINE`, unità in millimetri e livello `RICALCO`.
 
 ## Avvio dal sorgente
