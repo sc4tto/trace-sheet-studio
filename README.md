@@ -5,18 +5,21 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.1.0-test**.
+Versione corrente: **0.2.0-test**.
 
 ## Funzioni del primo prototipo
 
 - apertura di PNG, JPEG, BMP e TIFF;
 - flusso separato **Originale → Raster preparato → Scheletro → Sovrapposizione**;
 - anteprima raster prima della generazione vettoriale;
+- aggiornamento raster in tempo reale durante la regolazione dei parametri;
+- soglia manuale, Otsu automatica e Sauvola locale;
 - salvataggio del raster preparato in PNG;
 - modalità **Linee centrali** per planimetrie, aste e disegni tecnici;
 - modalità sperimentale **Contorni delle sagome** per intarsi e aree cromatiche;
 - soglia automatica o manuale, contrasto, sfocatura e chiusura delle interruzioni;
 - assottigliamento monolinea e semplificazione dei tracciati;
+- motori Monolinea, Rette, Curve morbide e Ibrido;
 - esportazione DXF ASCII con `LWPOLYLINE`, unità in millimetri e livello `RICALCO`.
 
 ## Avvio dal sorgente
@@ -47,7 +50,9 @@ avviare `TraceSheetStudio.exe`.
 
 ## Stato e limiti noti
 
-La modalità monolinea è il percorso principale del primo checkpoint. La modalità a sagome è
+La modalità Curve morbide usa Chaikin come approssimazione stabile di una B-spline quadratica
+e viene ancora esportata come polilinea campionata; l'entità DXF `SPLINE` nativa è prevista
+nel checkpoint successivo. La modalità a sagome è
 ancora sperimentale: fotografie con venature o texture marcate possono generare troppi
 segmenti. Ritaglio, correzione prospettica, calibrazione grafica su una misura nota e livelli
 DXF separati per colore sono previsti nei prossimi checkpoint.
