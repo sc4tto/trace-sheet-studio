@@ -12,5 +12,5 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: python -m pip install Pillow numpy pytest
+      - run: python -m pip install -r requirements.txt pytest
       - run: python -m pytest -q
