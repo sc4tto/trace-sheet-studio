@@ -5,7 +5,12 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.6.0-test**.
+Versione corrente: **0.7.0-test**.
+
+La scheda **Confronto raster + vettore** mostra simultaneamente regioni elaborate
+e sovrapposizione geometrica. La nuova **Analisi combinata** integra segmentazione
+cromatica e soglia nello stesso grafo di generatrici; il motore geometrico resta
+selezionabile anche durante il riconoscimento delle sagome.
 
 La ricostruzione delle sagome produce ora un grafo di bordi condivisi: ogni
 separazione fisica è trasformata in un asse unico e i frammenti tangenti vengono

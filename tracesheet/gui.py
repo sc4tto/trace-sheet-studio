@@ -122,7 +122,8 @@ class TraceSheetApp(tk.Tk):
         box.pack(fill="x", pady=4)
         self.mode_var = tk.StringVar(value="Linee centrali")
         combo = ttk.Combobox(box, state="readonly", textvariable=self.mode_var,
-                             values=["Linee centrali", "Contorni delle sagome"], width=28)
+                             values=["Linee centrali", "Contorni delle sagome",
+                                     "Analisi combinata"], width=28)
         combo.pack(fill="x")
         combo.bind("<<ComboboxSelected>>", lambda _e: self._mode_changed())
         self.mode_help = ttk.Label(box, text="Per planimetrie, aste e disegni tecnici.", wraplength=290)
@@ -249,6 +250,20 @@ class TraceSheetApp(tk.Tk):
 
         self.notebook = ttk.Notebook(preview)
         self.notebook.pack(fill="both", expand=True)
+        compare_tab = ttk.Frame(self.notebook, padding=5)
+        self.notebook.add(compare_tab, text="Confronto raster + vettore")
+        compare_panes = ttk.Panedwindow(compare_tab, orient="horizontal")
+        compare_panes.pack(fill="both", expand=True)
+        for key, title_text, placeholder in [
+            ("compare_raster", "Raster / regioni", "Genera il raster"),
+            ("compare_overlay", "Vettore sovrapposto", "Genera il ricalco"),
+        ]:
+            side = ttk.LabelFrame(compare_panes, text=title_text, padding=4)
+            compare_panes.add(side, weight=1)
+            label = ttk.Label(side, text=placeholder, anchor="center", style="Preview.TLabel")
+            label.pack(fill="both", expand=True)
+            setattr(self, f"{key}_label", label)
+            label.bind("<Configure>", lambda _e, k=key: self._refresh_preview(k))
         for key, title_text, placeholder in [
             ("original", "Originale", "Apri un'immagine"),
             ("raster", "Raster preparato", "Genera il raster"),
@@ -281,19 +296,26 @@ class TraceSheetApp(tk.Tk):
         return label, scale
 
     def _threshold_mode_changed(self, schedule=True):
+        threshold_active = self.mode_var.get() != "Contorni delle sagome"
         manual = self.threshold_mode_var.get() == "Manuale"
         sauvola = self.threshold_mode_var.get() == "Sauvola locale"
         for widget in self.threshold_row:
-            widget.configure(state="normal" if manual else "disabled")
+            widget.configure(state="normal" if threshold_active and manual else "disabled")
         for widget in self.sauvola_row:
-            widget.configure(state="normal" if sauvola else "disabled")
+            widget.configure(state="normal" if threshold_active and sauvola else "disabled")
         if schedule:
             self._schedule_live_preview()
 
     def _mode_changed(self):
-        contours = self.mode_var.get() == "Contorni delle sagome"
-        self.mode_help.configure(text=("Per intarsi, campiture e confini fra aree cromatiche."
-                                       if contours else "Per planimetrie, aste e disegni tecnici."))
+        contours = self.mode_var.get() in {"Contorni delle sagome", "Analisi combinata"}
+        combined = self.mode_var.get() == "Analisi combinata"
+        if combined:
+            help_text = "Combina aree cromatiche con soglia, fessure e linee persistenti."
+        elif contours:
+            help_text = "Per intarsi, campiture e confini fra aree cromatiche."
+        else:
+            help_text = "Per planimetrie, aste e disegni tecnici."
+        self.mode_help.configure(text=help_text)
         state = "normal" if contours else "disabled"
         for row in (self.colors_row, self.region_color_row, self.min_region_row,
                     self.texture_row, self.region_merge_row):
@@ -303,12 +325,15 @@ class TraceSheetApp(tk.Tk):
             self.blur_var.set(2.0)
         elif not contours and self.blur_var.get() > 1.5:
             self.blur_var.set(0.6)
-        self.recognition_combo.configure(state="disabled" if contours else "readonly")
-        for row in (self.line_tolerance_row, self.flow_coherence_row, self.flow_gap_row):
+        self.recognition_combo.configure(state="readonly")
+        for widget in self.line_tolerance_row:
+            widget.configure(state="normal")
+        for row in (self.flow_coherence_row, self.flow_gap_row):
             for widget in row:
-                widget.configure(state="disabled" if contours else "normal")
+                widget.configure(state="normal" if combined or not contours else "disabled")
         for widget in self.flow_angle_row:
             widget.configure(state="normal")
+        self._threshold_mode_changed(schedule=False)
         self._schedule_live_preview()
 
     def about(self):
@@ -346,8 +371,11 @@ class TraceSheetApp(tk.Tk):
                              "Curve morbide": "curves", "Ibrido": "hybrid",
                              "Flussi direzionali": "flows"}
         threshold_mode = threshold_modes[self.threshold_mode_var.get()]
+        mode_names = {"Linee centrali": "centerline",
+                      "Contorni delle sagome": "contours",
+                      "Analisi combinata": "combined"}
         return TraceSettings(
-            mode="contours" if self.mode_var.get() == "Contorni delle sagome" else "centerline",
+            mode=mode_names[self.mode_var.get()],
             threshold_mode=threshold_mode,
             threshold=round(self.threshold_var.get()), automatic_threshold=threshold_mode == "otsu",
             sauvola_window=round(self.sauvola_window_var.get()),
@@ -395,7 +423,8 @@ class TraceSheetApp(tk.Tk):
         if self.recognition_var.get() == "Flussi direzionali":
             maximum = 450
         else:
-            maximum = 600 if self.mode_var.get() == "Contorni delle sagome" else 750
+            maximum = 600 if self.mode_var.get() in {
+                "Contorni delle sagome", "Analisi combinata"} else 750
         settings = replace(self._settings(), max_dimension=maximum)
         image = self.source_image.copy()
         threading.Thread(target=self._live_worker, args=(token, image, settings), daemon=True).start()
@@ -532,7 +561,7 @@ class TraceSheetApp(tk.Tk):
                     self._set_image("raster", result.raster)
                     self._set_image("skeleton", result.skeleton)
                     self._set_image("overlay", result.overlay)
-                    if settings.mode == "contours":
+                    if settings.mode in {"contours", "combined"}:
                         layer_count = len(result.vector_layers.get("01_TESSERE_CHIUSE", [])) if result.vector_layers else 0
                         description = (f"{layer_count} tessere | fusione {settings.region_merge_delta:.1f}"
                                        f" | texture {settings.texture_suppression}")
@@ -544,7 +573,7 @@ class TraceSheetApp(tk.Tk):
                         description += f" | nero {black:.1f}%"
                     self.summary.configure(text=f"{description} | {len(result.paths):,} vettori | anteprima {result.processing_scale:.3f}")
                     self.status_label.configure(text="Anteprima raster e vettoriale aggiornata in tempo reale.")
-                    self.notebook.select(3)
+                    self.notebook.select(0)
                 elif kind == "live_error":
                     token, _exc = payload
                     if token == self.live_token:
@@ -567,7 +596,7 @@ class TraceSheetApp(tk.Tk):
                         text="Regione OKLab pronta. Aggiungi campioni o regola la tolleranza.")
                     self.raster_toolbar.configure(state="normal")
                     self.dxf_toolbar.configure(state="normal")
-                    self.notebook.select(3)
+                    self.notebook.select(4)
                 elif kind == "prepared":
                     self.prepared_raster, scale, self.prepared_settings = payload
                     self.result = None
@@ -578,7 +607,7 @@ class TraceSheetApp(tk.Tk):
                     self.dxf_toolbar.configure(state="disabled")
                     self.trace_button.configure(state="normal")
                     self.trace_toolbar.configure(state="normal")
-                    self.notebook.select(1)
+                    self.notebook.select(2)
                 else:
                     self.result = payload
                     self._set_image("raster", payload.raster)
@@ -590,7 +619,7 @@ class TraceSheetApp(tk.Tk):
                     self.dxf_toolbar.configure(state="normal")
                     self.trace_button.configure(state="normal")
                     self.trace_toolbar.configure(state="normal")
-                    self.notebook.select(3)
+                    self.notebook.select(0)
         except queue.Empty:
             pass
         self.after(100, self._poll)
@@ -598,6 +627,12 @@ class TraceSheetApp(tk.Tk):
     def _set_image(self, key, image):
         setattr(self, f"_{key}_image", image.copy())
         self._refresh_preview(key)
+        if key == "raster":
+            self._compare_raster_image = image.copy()
+            self._refresh_preview("compare_raster")
+        elif key == "overlay":
+            self._compare_overlay_image = image.copy()
+            self._refresh_preview("compare_overlay")
 
     def _refresh_preview(self, key):
         image = getattr(self, f"_{key}_image", None)

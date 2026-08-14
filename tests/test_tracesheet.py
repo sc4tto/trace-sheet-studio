@@ -148,3 +148,22 @@ def test_shared_boundaries_export_once_on_separate_layers(tmp_path: Path):
     assert "02_CURVE_GENERATRICI" in document.layers
     assert "03_PERIMETRO" in document.layers
     assert len(document.modelspace().query('*[layer=="02_CURVE_GENERATRICI"]')) == len(generators)
+
+
+def test_combined_analysis_adds_threshold_lines_to_color_boundaries():
+    image = Image.new("RGB", (160, 100), "#c79662")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((80, 0, 159, 99), fill="#714126")
+    draw.line((10, 50, 70, 50), fill="black", width=3)
+    common = dict(colors=2, min_region_area=20, region_merge_delta=2,
+                  texture_suppression=3, min_path_pixels=3,
+                  simplify_pixels=1, recognition_mode="hybrid")
+    color = trace_image(image, TraceSettings(mode="contours", **common))
+    combined = trace_image(
+        image, TraceSettings(mode="combined", threshold_mode="manual",
+                             automatic_threshold=False, threshold=40,
+                             blur_radius=0, close_gaps=0, **common),
+    )
+    assert len(combined.paths) > len(color.paths)
+    assert combined.vector_layers
+    assert combined.vector_layers["02_CURVE_GENERATRICI"] == combined.paths

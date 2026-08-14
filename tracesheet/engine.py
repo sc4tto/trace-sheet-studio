@@ -304,6 +304,24 @@ def _sauvola(gray: np.ndarray, window: int, k: float) -> np.ndarray:
     return gray < local_threshold
 
 
+def _threshold_mask(image: Image.Image, settings: TraceSettings) -> np.ndarray:
+    gray_image = ImageOps.grayscale(image)
+    gray_image = ImageEnhance.Contrast(gray_image).enhance(max(0.05, settings.contrast))
+    if settings.blur_radius > 0:
+        gray_image = gray_image.filter(ImageFilter.GaussianBlur(settings.blur_radius))
+    gray = np.asarray(gray_image, dtype=np.uint8)
+    threshold_mode = settings.threshold_mode.lower()
+    if threshold_mode == "sauvola":
+        mask = _sauvola(gray, settings.sauvola_window, settings.sauvola_k)
+    else:
+        automatic = settings.automatic_threshold and threshold_mode != "manual"
+        threshold = _otsu(gray) if automatic else int(settings.threshold)
+        mask = gray < threshold
+    if settings.invert:
+        mask = ~mask
+    return _close(mask, settings.close_gaps)
+
+
 def _rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
     values = rgb.astype(np.float64) / 255.0
     linear = np.where(values <= 0.04045, values / 12.92,
@@ -455,25 +473,17 @@ def segment_from_samples(image: Image.Image,
 
 def prepare_raster(image: Image.Image, settings: TraceSettings) -> tuple[Image.Image, np.ndarray, float]:
     work, scale = _resize_for_processing(image.convert("RGB"), settings.max_dimension)
-    if settings.mode == "contours":
+    if settings.mode in {"contours", "combined"}:
         raster, _labels, mask = _segment_regions(work, settings)
+        if settings.mode == "combined":
+            line_mask = _threshold_mask(work, settings)
+            array = np.asarray(raster.convert("RGB")).copy()
+            array[skeletonize(line_mask)] = (0, 0, 0)
+            raster = Image.fromarray(array, mode="RGB")
+            mask = mask | line_mask
     else:
-        gray_image = ImageOps.grayscale(work)
-        gray_image = ImageEnhance.Contrast(gray_image).enhance(max(0.05, settings.contrast))
-        if settings.blur_radius > 0:
-            gray_image = gray_image.filter(ImageFilter.GaussianBlur(settings.blur_radius))
-        gray = np.asarray(gray_image, dtype=np.uint8)
-        threshold_mode = settings.threshold_mode.lower()
-        if threshold_mode == "sauvola":
-            mask = _sauvola(gray, settings.sauvola_window, settings.sauvola_k)
-        else:
-            automatic = settings.automatic_threshold and threshold_mode != "manual"
-            threshold = _otsu(gray) if automatic else int(settings.threshold)
-            mask = gray < threshold
-        if settings.invert:
-            mask = ~mask
-        mask = _close(mask, settings.close_gaps)
-    if settings.mode != "contours":
+        mask = _threshold_mask(work, settings)
+    if settings.mode not in {"contours", "combined"}:
         raster = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8), mode="L")
     return raster, mask, scale
 
@@ -808,11 +818,26 @@ def _overlay(original: Image.Image, paths: Iterable[Iterable[tuple[float, float]
 def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
     original = image.convert("RGB")
     vector_layers = None
-    if settings.mode == "contours":
+    if settings.mode in {"contours", "combined"}:
         work, scale = _resize_for_processing(original, settings.max_dimension)
         raster, labels, _raw_boundary = _segment_regions(work, settings)
         tile_paths = _region_paths(labels, settings.min_region_area, settings.simplify_pixels)
         thin, paths = _shared_boundary_generators(labels, settings)
+        if settings.mode == "combined":
+            line_mask = _threshold_mask(work, settings)
+            line_thin = skeletonize(line_mask)
+            line_paths = skeleton_to_paths(
+                line_thin, settings.min_path_pixels, settings.simplify_pixels)
+            paths = _join_boundary_strokes(paths + line_paths, settings.generator_angle,
+                                           max(3.0, settings.flow_gap * 0.25))
+            thin = thin | line_thin
+            raster_array = np.asarray(raster.convert("RGB")).copy()
+            raster_array[line_thin] = (0, 0, 0)
+            raster = Image.fromarray(raster_array, mode="RGB")
+        geometry_mode = settings.recognition_mode
+        if geometry_mode == "flows":
+            geometry_mode = "hybrid"
+        paths = recognize_paths(paths, geometry_mode, settings.line_tolerance)
         perimeter = [[(0.0, 0.0), (float(work.width - 1), 0.0),
                       (float(work.width - 1), float(work.height - 1)),
                       (0.0, float(work.height - 1)), (0.0, 0.0)]]
