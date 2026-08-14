@@ -207,6 +207,28 @@ class TraceSheetApp(tk.Tk):
         ttk.Scale(tolerance_frame, from_=0.01, to=0.20, variable=self.sample_tolerance_var,
                   command=lambda _v: self._schedule_sample_preview()).pack(
                       side="right", fill="x", expand=True, padx=(8, 0))
+        self.sample_radius_var = tk.IntVar(value=8)
+        radius_frame = ttk.Frame(sample_box)
+        radius_frame.pack(fill="x", pady=(5, 0))
+        ttk.Label(radius_frame, text="Raggio campione").pack(side="left")
+        ttk.Scale(radius_frame, from_=1, to=30, variable=self.sample_radius_var,
+                  command=lambda _v: self._schedule_sample_preview()).pack(
+                      side="right", fill="x", expand=True, padx=(8, 0))
+        self.lightness_weight_var = tk.DoubleVar(value=0.35)
+        light_frame = ttk.Frame(sample_box)
+        light_frame.pack(fill="x", pady=(5, 0))
+        ttk.Label(light_frame, text="Peso luminosità").pack(side="left")
+        ttk.Scale(light_frame, from_=0.0, to=1.5, variable=self.lightness_weight_var,
+                  command=lambda _v: self._schedule_sample_preview()).pack(
+                      side="right", fill="x", expand=True, padx=(8, 0))
+        self.largest_only_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(sample_box, text="Conserva solo componente principale",
+                        variable=self.largest_only_var,
+                        command=self._schedule_sample_preview).pack(anchor="w", pady=(5, 0))
+        self.fill_holes_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(sample_box, text="Ignora fori e venature interne",
+                        variable=self.fill_holes_var,
+                        command=self._schedule_sample_preview).pack(anchor="w")
         self.sample_count_label = ttk.Label(sample_box, text="Positivi: 0 | Negativi: 0")
         self.sample_count_label.pack(anchor="w", pady=(5, 0))
         ttk.Button(sample_box, text="Calcola regione dai campioni",
@@ -449,14 +471,19 @@ class TraceSheetApp(tk.Tk):
         self.progress.start(12)
         self.status_label.configure(text="Calcolo della regione OKLab dai campioni...")
         args = (self.source_image.copy(), self.positive_samples.copy(), self.negative_samples.copy(),
-                float(self.sample_tolerance_var.get()), required == 3, float(self.simplify_var.get()))
+                float(self.sample_tolerance_var.get()), required == 3, float(self.simplify_var.get()),
+                round(self.sample_radius_var.get()), float(self.lightness_weight_var.get()),
+                self.largest_only_var.get(), self.fill_holes_var.get())
         threading.Thread(target=self._sample_worker, args=args, daemon=True).start()
 
-    def _sample_worker(self, image, positive, negative, tolerance, linear, simplify):
+    def _sample_worker(self, image, positive, negative, tolerance, linear, simplify,
+                       radius, lightness_weight, keep_largest, fill_holes):
         try:
             sample = segment_from_samples(
                 image, positive, negative, tolerance=tolerance,
-                linear_gradient=linear, simplify_pixels=simplify)
+                linear_gradient=linear, simplify_pixels=simplify,
+                sample_radius=radius, lightness_weight=lightness_weight,
+                keep_largest=keep_largest, fill_holes=fill_holes)
             self.events.put(("sample_done", sample))
         except Exception as exc:
             self.events.put(("error", exc))
@@ -572,8 +599,14 @@ class TraceSheetApp(tk.Tk):
             return
         filename = filedialog.asksaveasfilename(defaultextension=".dxf", filetypes=[("DXF", "*.dxf")])
         if filename:
-            export_dxf(self.result, filename, float(self.mm_var.get()))
+            try:
+                export_dxf(self.result, filename, float(self.mm_var.get()))
+            except Exception as exc:
+                messagebox.showerror("Esportazione DXF", f"Impossibile esportare il DXF:\n\n{exc}")
+                self.status_label.configure(text="Esportazione DXF non riuscita")
+                return
             self.status_label.configure(text=f"DXF salvato: {filename}")
+            messagebox.showinfo("Esportazione DXF", f"File esportato correttamente:\n{filename}")
 
 
 def run():
