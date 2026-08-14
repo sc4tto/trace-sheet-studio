@@ -5,7 +5,7 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.2.0-test**.
+Versione corrente: **0.3.0-test**.
 
 ## Funzioni del primo prototipo
 
@@ -20,6 +20,9 @@ Versione corrente: **0.2.0-test**.
 - soglia automatica o manuale, contrasto, sfocatura e chiusura delle interruzioni;
 - assottigliamento monolinea e semplificazione dei tracciati;
 - motori Monolinea, Rette, Curve morbide e Ibrido;
+- segmentazione degli intarsi in spazio colore Lab tramite Mean Shift e clustering;
+- fusione delle piccole regioni e controllo dell'area minima;
+- contorni chiusi delle tessere, pronti per l'esportazione DXF;
 - esportazione DXF ASCII con `LWPOLYLINE`, unità in millimetri e livello `RICALCO`.
 
 ## Avvio dal sorgente
@@ -52,9 +55,9 @@ avviare `TraceSheetStudio.exe`.
 
 La modalità Curve morbide usa Chaikin come approssimazione stabile di una B-spline quadratica
 e viene ancora esportata come polilinea campionata; l'entità DXF `SPLINE` nativa è prevista
-nel checkpoint successivo. La modalità a sagome è
-ancora sperimentale: fotografie con venature o texture marcate possono generare troppi
-segmenti. Ritaglio, correzione prospettica, calibrazione grafica su una misura nota e livelli
+nel checkpoint successivo. La modalità a sagome usa regioni cromatiche chiuse; la qualità
+dipende ancora dalla differenza di colore fra legni adiacenti e dall'illuminazione. Ritaglio,
+correzione prospettica, calibrazione grafica su una misura nota e livelli
 DXF separati per colore sono previsti nei prossimi checkpoint.
 
 ## Licenza
