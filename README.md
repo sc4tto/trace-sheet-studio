@@ -5,7 +5,12 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.7.0-test**.
+Versione corrente: **0.7.1-test**.
+
+Ogni cursore dispone ora di un campo numerico sincronizzato e modificabile. Il
+programma si apre con il preset **Intarsio – direttrici principali**, calibrato
+sull'immagine di riferimento; il preset può essere ripristinato dal pannello
+Tipo di ricalco senza impedire successive regolazioni manuali.
 
 La scheda **Confronto raster + vettore** mostra simultaneamente regioni elaborate
 e sovrapposizione geometrica. La nuova **Analisi combinata** integra segmentazione

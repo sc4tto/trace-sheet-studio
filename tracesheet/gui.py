@@ -120,7 +120,7 @@ class TraceSheetApp(tk.Tk):
 
         box = ttk.LabelFrame(controls, text="2. Tipo di ricalco", padding=7)
         box.pack(fill="x", pady=4)
-        self.mode_var = tk.StringVar(value="Linee centrali")
+        self.mode_var = tk.StringVar(value="Analisi combinata")
         combo = ttk.Combobox(box, state="readonly", textvariable=self.mode_var,
                              values=["Linee centrali", "Contorni delle sagome",
                                      "Analisi combinata"], width=28)
@@ -128,6 +128,8 @@ class TraceSheetApp(tk.Tk):
         combo.bind("<<ComboboxSelected>>", lambda _e: self._mode_changed())
         self.mode_help = ttk.Label(box, text="Per planimetrie, aste e disegni tecnici.", wraplength=290)
         self.mode_help.pack(anchor="w", pady=(6, 0))
+        ttk.Button(box, text="Ripristina preset intarsio",
+                   command=self._apply_inlay_preset).pack(fill="x", pady=(6, 0))
 
         box = ttk.LabelFrame(controls, text="3. Preparazione raster", padding=7)
         box.pack(fill="x", pady=4)
@@ -175,9 +177,9 @@ class TraceSheetApp(tk.Tk):
         recognition_combo.grid(row=0, column=1, sticky="e")
         self.recognition_combo = recognition_combo
         recognition_combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_live_preview())
-        self.minimum_var = tk.IntVar(value=8)
+        self.minimum_var = tk.IntVar(value=12)
         self._row_scale(box, 1, "Tratto minimo (px)", self.minimum_var, 2, 80)
-        self.simplify_var = tk.DoubleVar(value=1.5)
+        self.simplify_var = tk.DoubleVar(value=2.0)
         self._row_scale(box, 2, "Semplificazione", self.simplify_var, 0.0, 8.0)
         self.line_tolerance_var = tk.DoubleVar(value=1.5)
         self.line_tolerance_row = self._row_scale(box, 3, "Tolleranza rette", self.line_tolerance_var, 0.2, 6.0)
@@ -293,7 +295,41 @@ class TraceSheetApp(tk.Tk):
         scale = ttk.Scale(parent, from_=start, to=end, variable=variable,
                           command=lambda _value: self._schedule_live_preview())
         scale.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
-        return label, scale
+        integer = isinstance(variable, tk.IntVar)
+        value = ttk.Spinbox(
+            parent, from_=start, to=end, textvariable=variable, width=6,
+            increment=1 if integer else 0.1,
+            format="%.0f" if integer else "%.2f",
+            command=self._schedule_live_preview,
+        )
+        value.grid(row=row, column=2, sticky="e", padx=(5, 0), pady=(4, 0))
+        value.bind("<Return>", lambda _e: self._schedule_live_preview(immediate=True))
+        value.bind("<FocusOut>", lambda _e: self._schedule_live_preview())
+        return label, scale, value
+
+    def _apply_inlay_preset(self):
+        """Recommended editable starting point for the reference wood-inlay photo."""
+        self.mode_var.set("Analisi combinata")
+        self.threshold_mode_var.set("Otsu automatica")
+        self.threshold_var.set(185)
+        self.sauvola_window_var.set(31)
+        self.contrast_var.set(1.25)
+        self.blur_var.set(2.0)
+        self.close_var.set(1)
+        self.invert_var.set(False)
+        self.colors_var.set(20)
+        self.region_color_var.set(28)
+        self.min_region_var.set(80)
+        self.texture_suppression_var.set(13)
+        self.region_merge_var.set(7.0)
+        self.recognition_var.set("Ibrido")
+        self.minimum_var.set(12)
+        self.simplify_var.set(2.0)
+        self.line_tolerance_var.set(1.5)
+        self.flow_coherence_var.set(0.42)
+        self.flow_gap_var.set(18.0)
+        self.flow_angle_var.set(18.0)
+        self._mode_changed()
 
     def _threshold_mode_changed(self, schedule=True):
         threshold_active = self.mode_var.get() != "Contorni delle sagome"
