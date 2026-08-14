@@ -33,6 +33,8 @@ def test_contour_mode_finds_color_boundaries():
     ImageDraw.Draw(image).rectangle((20, 20, 80, 60), fill="#7b4422")
     result = trace_image(image, TraceSettings(mode="contours", colors=3, blur_radius=0, min_path_pixels=3))
     assert result.paths
+    assert result.raster.mode == "RGB"
+    assert all(path[0] == path[-1] for path in result.paths)
 
 
 def test_sauvola_handles_uneven_background():
