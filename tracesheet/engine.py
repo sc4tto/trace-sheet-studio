@@ -6,6 +6,11 @@ from typing import Iterable
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
+try:
+    import cv2
+except ImportError:  # pragma: no cover - converted into a clear runtime error below
+    cv2 = None
+
 
 @dataclass(frozen=True)
 class TraceSettings:
@@ -24,6 +29,9 @@ class TraceSettings:
     recognition_mode: str = "hybrid"
     line_tolerance: float = 1.5
     colors: int = 8
+    region_spatial_radius: int = 12
+    region_color_radius: int = 28
+    min_region_area: int = 100
     max_dimension: int = 1400
 
 
@@ -100,9 +108,7 @@ def _close(mask: np.ndarray, passes: int) -> np.ndarray:
     return result
 
 
-def _quantized_boundaries(image: Image.Image, colors: int) -> np.ndarray:
-    quantized = image.convert("RGB").quantize(colors=max(2, colors), method=Image.Quantize.MEDIANCUT)
-    labels = np.asarray(quantized, dtype=np.int16)
+def _label_boundaries(labels: np.ndarray) -> np.ndarray:
     boundary = np.zeros(labels.shape, dtype=bool)
     horizontal = labels[:, 1:] != labels[:, :-1]
     vertical = labels[1:, :] != labels[:-1, :]
@@ -111,6 +117,78 @@ def _quantized_boundaries(image: Image.Image, colors: int) -> np.ndarray:
     boundary[1:, :] |= vertical
     boundary[:-1, :] |= vertical
     return boundary
+
+
+def _merge_small_regions(labels: np.ndarray, minimum_area: int) -> np.ndarray:
+    cleaned = labels.astype(np.int32).copy()
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    for _ in range(2):
+        changed = False
+        for label_id in np.unique(cleaned):
+            source = (cleaned == label_id).astype(np.uint8)
+            count, components, stats, _centroids = cv2.connectedComponentsWithStats(source, 8)
+            for component_id in range(1, count):
+                if int(stats[component_id, cv2.CC_STAT_AREA]) >= minimum_area:
+                    continue
+                component = components == component_id
+                ring = cv2.dilate(component.astype(np.uint8), kernel, iterations=1).astype(bool) & ~component
+                neighbors = cleaned[ring]
+                neighbors = neighbors[neighbors != label_id]
+                if neighbors.size:
+                    replacement = int(np.bincount(neighbors).argmax())
+                    cleaned[component] = replacement
+                    changed = True
+        if not changed:
+            break
+    return cleaned
+
+
+def _segment_regions(image: Image.Image, settings: TraceSettings) -> tuple[Image.Image, np.ndarray, np.ndarray]:
+    if cv2 is None:
+        raise RuntimeError("La modalità a sagome richiede opencv-python-headless.")
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    filtered = cv2.pyrMeanShiftFiltering(
+        bgr,
+        sp=max(2, int(settings.region_spatial_radius)),
+        sr=max(2, int(settings.region_color_radius)),
+        maxLevel=1,
+    )
+    lab = cv2.cvtColor(filtered, cv2.COLOR_BGR2LAB)
+    samples = lab.reshape((-1, 3)).astype(np.float32)
+    cluster_count = max(2, min(32, int(settings.colors)))
+    cv2.setRNGSeed(0)
+    _compactness, labels, centers = cv2.kmeans(
+        samples,
+        cluster_count,
+        None,
+        (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5),
+        1,
+        cv2.KMEANS_PP_CENTERS,
+    )
+    labels = labels.reshape(lab.shape[:2]).astype(np.int32)
+    labels = _merge_small_regions(labels, max(1, int(settings.min_region_area)))
+    lab_segmented = centers[np.clip(labels, 0, len(centers) - 1)].astype(np.uint8)
+    segmented = cv2.cvtColor(lab_segmented, cv2.COLOR_LAB2RGB)
+    boundary = _label_boundaries(labels)
+    return Image.fromarray(segmented, mode="RGB"), labels, boundary
+
+
+def _region_paths(labels: np.ndarray, minimum_area: int,
+                  epsilon: float) -> list[list[tuple[float, float]]]:
+    paths: list[list[tuple[float, float]]] = []
+    for label_id in np.unique(labels):
+        binary = np.where(labels == label_id, 255, 0).astype(np.uint8)
+        contours, _hierarchy = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        for contour in contours:
+            if abs(float(cv2.contourArea(contour))) < minimum_area:
+                continue
+            approximated = cv2.approxPolyDP(contour, max(0.1, float(epsilon)), True)
+            points = [(float(item[0][0]), float(item[0][1])) for item in approximated]
+            if len(points) >= 3:
+                points.append(points[0])
+                paths.append(points)
+    return paths
 
 
 def _box_statistics(gray: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
@@ -138,7 +216,7 @@ def _sauvola(gray: np.ndarray, window: int, k: float) -> np.ndarray:
 def prepare_raster(image: Image.Image, settings: TraceSettings) -> tuple[Image.Image, np.ndarray, float]:
     work, scale = _resize_for_processing(image.convert("RGB"), settings.max_dimension)
     if settings.mode == "contours":
-        mask = _quantized_boundaries(work.filter(ImageFilter.GaussianBlur(settings.blur_radius)), settings.colors)
+        raster, _labels, mask = _segment_regions(work, settings)
     else:
         gray_image = ImageOps.grayscale(work)
         gray_image = ImageEnhance.Contrast(gray_image).enhance(max(0.05, settings.contrast))
@@ -155,7 +233,8 @@ def prepare_raster(image: Image.Image, settings: TraceSettings) -> tuple[Image.I
         if settings.invert:
             mask = ~mask
         mask = _close(mask, settings.close_gaps)
-    raster = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8), mode="L")
+    if settings.mode != "contours":
+        raster = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8), mode="L")
     return raster, mask, scale
 
 
@@ -327,10 +406,17 @@ def _overlay(original: Image.Image, paths: Iterable[Iterable[tuple[float, float]
 
 def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
     original = image.convert("RGB")
-    raster, mask, scale = prepare_raster(original, settings)
-    thin = skeletonize(mask)
-    paths = skeleton_to_paths(thin, settings.min_path_pixels, settings.simplify_pixels)
-    paths = recognize_paths(paths, settings.recognition_mode, settings.line_tolerance)
+    if settings.mode == "contours":
+        work, scale = _resize_for_processing(original, settings.max_dimension)
+        raster, labels, thin = _segment_regions(work, settings)
+        paths = _region_paths(labels, settings.min_region_area, settings.simplify_pixels)
+        if settings.recognition_mode in {"curves", "hybrid"}:
+            paths = [_smooth_curve(path) for path in paths]
+    else:
+        raster, mask, scale = prepare_raster(original, settings)
+        thin = skeletonize(mask)
+        paths = skeleton_to_paths(thin, settings.min_path_pixels, settings.simplify_pixels)
+        paths = recognize_paths(paths, settings.recognition_mode, settings.line_tolerance)
     skeleton_image = Image.fromarray(np.where(thin, 0, 255).astype(np.uint8), mode="L")
     return TraceResult(
         original=original,
