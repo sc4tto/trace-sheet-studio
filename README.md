@@ -5,7 +5,13 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.8.1-test**.
+Versione corrente: **0.9.0-test**.
+
+La versione 0.9 ricompone il grafo dello scheletro prima di applicare il filtro
+di lunghezza. Una linea attraversata da incroci, porte o simboli non viene più
+valutata come una serie di piccoli frammenti indipendenti. Il controllo
+**Conservazione scheletro** permette di passare da un ricalco selettivo delle
+direttrici a una vettorializzazione tecnica più fedele.
 
 Il ricalco strutturale usa ora una crescita per isteresi: i bordi forti possono
 recuperare segmenti cromaticamente coerenti entro una distanza limitata senza

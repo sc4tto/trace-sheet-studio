@@ -200,9 +200,12 @@ class TraceSheetApp(tk.Tk):
         self.flow_gap_row = self._row_scale(box, 5, "Unione frammenti", self.flow_gap_var, 2.0, 60.0)
         self.flow_angle_var = tk.DoubleVar(value=22.0)
         self.flow_angle_row = self._row_scale(box, 6, "Angolo massimo", self.flow_angle_var, 3.0, 45.0)
+        self.preservation_var = tk.DoubleVar(value=0.82)
+        self.preservation_row = self._row_scale(
+            box, 7, "Conservazione scheletro", self.preservation_var, 0.0, 1.0)
         self.mm_var = tk.DoubleVar(value=1.0)
-        ttk.Label(box, text="Scala (mm per pixel)").grid(row=7, column=0, sticky="w", pady=(6, 0))
-        ttk.Spinbox(box, from_=0.001, to=1000, increment=0.01, textvariable=self.mm_var, width=10).grid(row=7, column=1, sticky="e", pady=(6, 0))
+        ttk.Label(box, text="Scala (mm per pixel)").grid(row=8, column=0, sticky="w", pady=(6, 0))
+        ttk.Spinbox(box, from_=0.001, to=1000, increment=0.01, textvariable=self.mm_var, width=10).grid(row=8, column=1, sticky="e", pady=(6, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="5. Elaborazione", padding=7)
@@ -342,6 +345,7 @@ class TraceSheetApp(tk.Tk):
         self.flow_coherence_var.set(0.42)
         self.flow_gap_var.set(26.0)
         self.flow_angle_var.set(22.0)
+        self.preservation_var.set(0.82)
         self._mode_changed()
 
     def _threshold_mode_changed(self, schedule=True):
@@ -456,6 +460,7 @@ class TraceSheetApp(tk.Tk):
             generator_angle=float(self.flow_angle_var.get()),
             structural_strength=float(self.structural_strength_var.get()),
             structural_view=structural_views[self.structural_view_var.get()],
+            skeleton_preservation=float(self.preservation_var.get()),
         )
 
     def _schedule_live_preview(self, immediate=False):

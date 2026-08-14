@@ -41,6 +41,7 @@ class TraceSettings:
     generator_angle: float = 24.0
     structural_strength: float = 0.62
     structural_view: str = "primary"
+    skeleton_preservation: float = 0.82
     max_dimension: int = 1400
 
 
@@ -627,6 +628,43 @@ def _smooth_curve(points: list[tuple[float, float]], iterations: int = 2) -> lis
     return [tuple(point) for point in current]
 
 
+def _path_length(points: list[tuple[float, float]]) -> float:
+    if len(points) < 2:
+        return 0.0
+    values = np.asarray(points, dtype=float)
+    return float(np.linalg.norm(np.diff(values, axis=0), axis=1).sum())
+
+
+def graph_paths_from_skeleton(skeleton: np.ndarray, settings: TraceSettings
+                              ) -> list[list[tuple[float, float]]]:
+    """Recompose a skeleton graph before discarding its short half-edges.
+
+    ``skeleton_to_paths`` necessarily cuts at every junction. Filtering those
+    half-edges immediately loses much of a technical drawing. Here we first
+    retain almost every graph edge, pair tangent-compatible edges and only then
+    apply a length threshold to the resulting complete strokes.
+    """
+    preservation = float(np.clip(settings.skeleton_preservation, 0.0, 1.0))
+    extraction_minimum = 2 if preservation >= 0.45 else max(
+        2, round(settings.min_path_pixels * (0.55 - preservation)))
+    fragments = skeleton_to_paths(
+        skeleton, extraction_minimum, max(0.15, settings.simplify_pixels * 0.35))
+    if not fragments:
+        return []
+    joined = _join_boundary_strokes(
+        fragments, settings.generator_angle,
+        max(1.5, settings.flow_gap * (0.18 + 0.34 * preservation)))
+    minimum_length = max(1.5, settings.min_path_pixels * (1.15 - preservation))
+    paths: list[list[tuple[float, float]]] = []
+    for path in joined:
+        if _path_length(path) < minimum_length:
+            continue
+        simplified = _rdp(path, max(0.1, settings.simplify_pixels))
+        if len(simplified) >= 2:
+            paths.append(simplified)
+    return paths
+
+
 def recognize_paths(paths: list[list[tuple[float, float]]], mode: str,
                     line_tolerance: float) -> list[list[tuple[float, float]]]:
     mode = mode.lower()
@@ -872,10 +910,7 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
         if int(stats[component_id, cv2.CC_STAT_AREA]) >= minimum:
             cleaned |= components == component_id
     primary_thin = skeletonize(cleaned)
-    fragments = skeleton_to_paths(
-        primary_thin, settings.min_path_pixels, settings.simplify_pixels)
-    chains = _join_boundary_strokes(
-        fragments, settings.generator_angle, max(5.0, settings.flow_gap * 0.60))
+    chains = graph_paths_from_skeleton(primary_thin, settings)
     primary_paths = recognize_paths(
         chains, "hybrid" if settings.recognition_mode == "flows"
         else settings.recognition_mode, settings.line_tolerance)
@@ -961,7 +996,7 @@ def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
     else:
         raster, mask, scale = prepare_raster(original, settings)
         thin = skeletonize(mask)
-        paths = skeleton_to_paths(thin, settings.min_path_pixels, settings.simplify_pixels)
+        paths = graph_paths_from_skeleton(thin, settings)
         paths = recognize_paths(paths, settings.recognition_mode, settings.line_tolerance)
     skeleton_image = Image.fromarray(np.where(thin, 0, 255).astype(np.uint8), mode="L")
     return TraceResult(

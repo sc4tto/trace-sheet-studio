@@ -5,7 +5,8 @@ import ezdxf
 from PIL import Image, ImageDraw
 
 from tracesheet.engine import (TraceResult, TraceSettings, merge_coherent_paths, prepare_raster,
-                               segment_from_samples, skeletonize, trace_image)
+                               graph_paths_from_skeleton, segment_from_samples, skeletonize,
+                               trace_image)
 from tracesheet.exporters import export_dxf
 
 
@@ -185,3 +186,28 @@ def test_structural_mode_separates_primary_boundaries_from_fine_texture():
     assert result.vector_layers
     assert result.vector_layers["02_CURVE_GENERATRICI"] == result.paths
     assert "05_DETTAGLI_SECONDARI" in result.vector_layers
+
+
+def test_graph_recomposition_filters_after_joining_short_half_edges():
+    skeleton = np.zeros((80, 140), dtype=bool)
+    skeleton[40, 10:130] = True
+    for x in (35, 65, 95):
+        skeleton[34:47, x] = True
+    settings = TraceSettings(min_path_pixels=18, simplify_pixels=0.5,
+                             flow_gap=8, generator_angle=18,
+                             skeleton_preservation=0.9)
+    paths = graph_paths_from_skeleton(skeleton, settings)
+    assert paths
+    assert max(abs(path[-1][0] - path[0][0]) for path in paths) > 80
+
+
+def test_low_preservation_discards_isolated_short_noise():
+    skeleton = np.zeros((50, 100), dtype=bool)
+    skeleton[20, 5:90] = True
+    skeleton[40, 10:14] = True
+    paths = graph_paths_from_skeleton(
+        skeleton, TraceSettings(min_path_pixels=12, simplify_pixels=0.5,
+                                skeleton_preservation=0.25, flow_gap=4))
+    assert paths
+    assert all(_path_span >= 10 for _path_span in
+               [max(p[-1][0], p[0][0]) - min(p[-1][0], p[0][0]) for p in paths])
