@@ -5,7 +5,13 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.10.0-test**.
+Versione corrente: **0.11.0-test**.
+
+La preparazione è ora l'unica sorgente della geometria: raster, scheletro,
+sovrapposizione e percorsi DXF vengono prodotti insieme e conservati. Il comando
+di generazione non rilegge più l'originale, ma promuove esattamente le linee
+approvate nell'anteprima. Il menu Geometria mostra soltanto motori compatibili
+con il tipo di dato preparato.
 
 Il motore **Direttrici da probabilità** usa la stessa superficie numerica
 mostrata nell'anteprima e ne estrae le creste ad alta affidabilità. Evita la

@@ -239,3 +239,25 @@ def test_preventive_analysis_distinguishes_plan_from_colour_photo():
     ImageDraw.Draw(photo).rectangle((100, 0, 199, 119), fill="#5e321f")
     assert analyze_image_profile(plan).kind == "technical"
     assert analyze_image_profile(photo).kind == "structural"
+
+
+def test_region_overlay_and_export_share_exact_same_paths(tmp_path: Path):
+    image = Image.new("RGB", (120, 80), "#d4a56f")
+    ImageDraw.Draw(image).rectangle((60, 0, 119, 79), fill="#643923")
+    result = trace_image(
+        image, TraceSettings(mode="contours", colors=2, min_region_area=10,
+                             region_merge_delta=1, texture_suppression=3,
+                             recognition_mode="hybrid", simplify_pixels=1),
+    )
+    assert result.vector_layers
+    assert result.paths == result.vector_layers["02_CURVE_GENERATRICI"]
+    overlay = np.asarray(result.overlay)
+    for path in result.paths:
+        x, y = map(round, path[len(path) // 2])
+        patch = overlay[max(0, y-2):y+3, max(0, x-2):x+3]
+        assert np.any((patch[..., 0] == 255) & (patch[..., 1] == 0))
+    output = tmp_path / "same-preview.dxf"
+    export_dxf(result, output, 1.0)
+    document = ezdxf.readfile(output)
+    exported = document.modelspace().query('*[layer=="02_CURVE_GENERATRICI"]')
+    assert len(exported) == len(result.paths)

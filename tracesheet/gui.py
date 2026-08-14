@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
-from .engine import (TraceResult, TraceSettings, analyze_image_profile, prepare_raster,
+from .engine import (TraceResult, TraceSettings, analyze_image_profile,
                      segment_from_samples, trace_image)
 from .exporters import export_dxf, export_raster
 from .version import APP_VERSION
@@ -32,6 +32,7 @@ class TraceSheetApp(tk.Tk):
         self.result: TraceResult | None = None
         self.prepared_raster: Image.Image | None = None
         self.prepared_settings: TraceSettings | None = None
+        self.prepared_result: TraceResult | None = None
         self.preview_refs: dict[str, ImageTk.PhotoImage] = {}
         self.preview_geometry: dict[str, tuple[int, int, int, int, float]] = {}
         self.positive_samples: list[tuple[int, int]] = []
@@ -123,7 +124,7 @@ class TraceSheetApp(tk.Tk):
         box.pack(fill="x", pady=4)
         self.mode_var = tk.StringVar(value="Ricalco strutturale")
         combo = ttk.Combobox(box, state="readonly", textvariable=self.mode_var,
-                             values=["Linee centrali", "Contorni delle sagome",
+                             values=["Linee centrali", "Regioni cromatiche → vettore",
                                      "Analisi combinata", "Ricalco strutturale"], width=28)
         combo.pack(fill="x")
         combo.bind("<<ComboboxSelected>>", lambda _e: self._mode_changed())
@@ -392,9 +393,18 @@ class TraceSheetApp(tk.Tk):
             self._schedule_live_preview()
 
     def _mode_changed(self):
-        contours = self.mode_var.get() in {"Contorni delle sagome", "Analisi combinata"}
+        contours = self.mode_var.get() in {"Regioni cromatiche → vettore", "Analisi combinata"}
         combined = self.mode_var.get() == "Analisi combinata"
         structural = self.mode_var.get() == "Ricalco strutturale"
+        compatible = {
+            "Linee centrali": ["Monolinea", "Rette", "Curve morbide", "Ibrido"],
+            "Regioni cromatiche → vettore": ["Bordi condivisi", "Curve morbide", "Ibrido"],
+            "Analisi combinata": ["Bordi condivisi", "Monolinea", "Curve morbide", "Ibrido"],
+            "Ricalco strutturale": ["Direttrici da probabilità", "Curve morbide", "Ibrido"],
+        }[self.mode_var.get()]
+        self.recognition_combo.configure(values=compatible)
+        if self.recognition_var.get() not in compatible:
+            self.recognition_var.set(compatible[0])
         if structural:
             help_text = "Conserva i bordi persistenti a più scale ed esclude la venatura fine."
         elif combined:
@@ -446,6 +456,7 @@ class TraceSheetApp(tk.Tk):
         self.result = None
         self.prepared_raster = None
         self.prepared_settings = None
+        self.prepared_result = None
         self.trace_button.configure(state="disabled")
         self.trace_toolbar.configure(state="disabled")
         self.raster_toolbar.configure(state="disabled")
@@ -462,11 +473,12 @@ class TraceSheetApp(tk.Tk):
         threshold_modes = {"Manuale": "manual", "Otsu automatica": "otsu", "Sauvola locale": "sauvola"}
         recognition_modes = {"Monolinea": "centerline", "Rette": "lines",
                              "Curve morbide": "curves", "Ibrido": "hybrid",
+                             "Bordi condivisi": "hybrid",
                              "Flussi direzionali": "flows",
                              "Direttrici da probabilità": "ridges"}
         threshold_mode = threshold_modes[self.threshold_mode_var.get()]
         mode_names = {"Linee centrali": "centerline",
-                      "Contorni delle sagome": "contours",
+                      "Regioni cromatiche → vettore": "contours",
                       "Analisi combinata": "combined",
                       "Ricalco strutturale": "structural"}
         structural_views = {"Solo primarie": "primary",
@@ -501,6 +513,7 @@ class TraceSheetApp(tk.Tk):
             return
         self.prepared_raster = None
         self.prepared_settings = None
+        self.prepared_result = None
         self.result = None
         if hasattr(self, "trace_button"):
             self.trace_button.configure(state="disabled")
@@ -525,7 +538,7 @@ class TraceSheetApp(tk.Tk):
             maximum = 450
         else:
             maximum = 600 if self.mode_var.get() in {
-                "Contorni delle sagome", "Analisi combinata",
+                "Regioni cromatiche → vettore", "Analisi combinata",
                 "Ricalco strutturale"} else 750
         settings = replace(self._settings(), max_dimension=maximum)
         image = self.source_image.copy()
@@ -551,28 +564,24 @@ class TraceSheetApp(tk.Tk):
 
     def _prepare_worker(self, image, settings):
         try:
-            raster, _mask, scale = prepare_raster(image, settings)
-            self.events.put(("prepared", (raster, scale, settings)))
+            # Preparation is the single source of truth: raster, skeleton,
+            # overlay and export paths are generated once and kept together.
+            result = trace_image(image, settings)
+            self.events.put(("prepared", (result, settings)))
         except Exception as exc:
             self.events.put(("error", exc))
 
     def start_trace(self):
-        if self.source_image is None or self.prepared_raster is None:
+        if self.source_image is None or self.prepared_result is None:
             messagebox.showwarning("Ricalco", "Prepara e controlla prima il raster.")
             return
         self.prepare_button.configure(state="disabled")
         self.trace_button.configure(state="disabled")
         self.progress.start(12)
         self.status_label.configure(text="Generazione dello scheletro e dei tracciati DXF...")
-        image = self.source_image.copy()
-        settings = self.prepared_settings or self._settings()
-        threading.Thread(target=self._worker, args=(image, settings), daemon=True).start()
-
-    def _worker(self, image, settings):
-        try:
-            self.events.put(("done", trace_image(image, settings)))
-        except Exception as exc:
-            self.events.put(("error", exc))
+        # Do not reinterpret the original: promote exactly the geometry which
+        # was approved in the prepared preview.
+        self.events.put(("done", self.prepared_result))
 
     def _add_sample(self, event, positive):
         geometry = self.preview_geometry.get("original")
@@ -704,16 +713,23 @@ class TraceSheetApp(tk.Tk):
                     self.dxf_toolbar.configure(state="normal")
                     self.notebook.select(4)
                 elif kind == "prepared":
-                    self.prepared_raster, scale, self.prepared_settings = payload
+                    prepared, self.prepared_settings = payload
+                    self.prepared_result = prepared
+                    self.prepared_raster = prepared.raster
                     self.result = None
-                    self._set_image("raster", self.prepared_raster)
-                    self.summary.configure(text=f"Raster pronto | scala elaborazione {scale:.3f}")
-                    self.status_label.configure(text="Raster pronto. Controllalo prima di generare il ricalco.")
+                    self._set_image("raster", prepared.raster)
+                    self._set_image("skeleton", prepared.skeleton)
+                    self._set_image("overlay", prepared.overlay)
+                    self.summary.configure(
+                        text=f"Raster pronto | {len(prepared.paths):,} vettori conseguenti"
+                             f" | scala {prepared.processing_scale:.3f}")
+                    self.status_label.configure(
+                        text="Raster e geometria preparati insieme. Il DXF userà esattamente queste linee.")
                     self.raster_toolbar.configure(state="normal")
                     self.dxf_toolbar.configure(state="disabled")
                     self.trace_button.configure(state="normal")
                     self.trace_toolbar.configure(state="normal")
-                    self.notebook.select(2)
+                    self.notebook.select(0)
                 else:
                     self.result = payload
                     self._set_image("raster", payload.raster)
