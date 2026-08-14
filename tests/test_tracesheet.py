@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from tracesheet.engine import (TraceSettings, prepare_raster, segment_from_samples,
+from tracesheet.engine import (TraceResult, TraceSettings, prepare_raster, segment_from_samples,
                                skeletonize, trace_image)
 from tracesheet.exporters import export_dxf
 
@@ -76,3 +76,21 @@ def test_sample_gradient_grows_connected_region():
     assert mask[45, 70] == 255
     assert mask[10, 10] == 0
     assert result.paths
+
+
+def test_sample_segmentation_keeps_largest_and_exports(tmp_path: Path):
+    image = np.full((100, 180, 3), 240, dtype=np.uint8)
+    image[20:80, 15:75] = (145, 105, 75)
+    image[20:80, 110:170] = (145, 105, 75)
+    pil = Image.fromarray(image)
+    sample = segment_from_samples(
+        pil, [(30, 30), (45, 50), (60, 70)], tolerance=0.06,
+        linear_gradient=True, sample_radius=4, keep_largest=True, fill_holes=True,
+    )
+    assert np.asarray(sample.mask)[50, 40] == 255
+    assert np.asarray(sample.mask)[50, 140] == 0
+    result = TraceResult(pil, sample.mask, sample.contour, sample.overlay,
+                         sample.paths, 1.0, pil.size)
+    output = tmp_path / "sample.dxf"
+    export_dxf(result, output, 1.0)
+    assert output.exists()
