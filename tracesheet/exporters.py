@@ -13,6 +13,10 @@ def export_raster(image: Image.Image, path: str | Path) -> None:
 
 def export_dxf(result: TraceResult, path: str | Path, mm_per_pixel: float = 1.0) -> None:
     """Write a small ASCII DXF using standard LWPOLYLINE entities."""
+    if not result.paths:
+        raise ValueError("Il risultato non contiene contorni vettoriali da esportare.")
+    if mm_per_pixel <= 0:
+        raise ValueError("La scala in millimetri per pixel deve essere maggiore di zero.")
     source_height = result.source_size[1]
     factor = mm_per_pixel / result.processing_scale
     lines = [
