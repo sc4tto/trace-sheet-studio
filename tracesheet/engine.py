@@ -10,14 +10,19 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 @dataclass(frozen=True)
 class TraceSettings:
     mode: str = "centerline"
+    threshold_mode: str = "otsu"
     threshold: int = 185
     automatic_threshold: bool = True
+    sauvola_window: int = 31
+    sauvola_k: float = 0.2
     invert: bool = False
     contrast: float = 1.25
     blur_radius: float = 0.6
     close_gaps: int = 1
     min_path_pixels: int = 8
     simplify_pixels: float = 1.5
+    recognition_mode: str = "hybrid"
+    line_tolerance: float = 1.5
     colors: int = 8
     max_dimension: int = 1400
 
@@ -108,6 +113,28 @@ def _quantized_boundaries(image: Image.Image, colors: int) -> np.ndarray:
     return boundary
 
 
+def _box_statistics(gray: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
+    window = max(3, int(window) | 1)
+    radius = window // 2
+    values = np.pad(gray.astype(np.float64), radius, mode="reflect")
+
+    def box_sum(array: np.ndarray) -> np.ndarray:
+        integral = np.pad(array, ((1, 0), (1, 0)), mode="constant").cumsum(0).cumsum(1)
+        return integral[window:, window:] - integral[:-window, window:] \
+            - integral[window:, :-window] + integral[:-window, :-window]
+
+    area = float(window * window)
+    mean = box_sum(values) / area
+    variance = np.maximum(0.0, box_sum(values * values) / area - mean * mean)
+    return mean, np.sqrt(variance)
+
+
+def _sauvola(gray: np.ndarray, window: int, k: float) -> np.ndarray:
+    mean, deviation = _box_statistics(gray, window)
+    local_threshold = mean * (1.0 + float(k) * (deviation / 128.0 - 1.0))
+    return gray < local_threshold
+
+
 def prepare_raster(image: Image.Image, settings: TraceSettings) -> tuple[Image.Image, np.ndarray, float]:
     work, scale = _resize_for_processing(image.convert("RGB"), settings.max_dimension)
     if settings.mode == "contours":
@@ -118,8 +145,13 @@ def prepare_raster(image: Image.Image, settings: TraceSettings) -> tuple[Image.I
         if settings.blur_radius > 0:
             gray_image = gray_image.filter(ImageFilter.GaussianBlur(settings.blur_radius))
         gray = np.asarray(gray_image, dtype=np.uint8)
-        threshold = _otsu(gray) if settings.automatic_threshold else int(settings.threshold)
-        mask = gray < threshold
+        threshold_mode = settings.threshold_mode.lower()
+        if threshold_mode == "sauvola":
+            mask = _sauvola(gray, settings.sauvola_window, settings.sauvola_k)
+        else:
+            automatic = settings.automatic_threshold and threshold_mode != "manual"
+            threshold = _otsu(gray) if automatic else int(settings.threshold)
+            mask = gray < threshold
         if settings.invert:
             mask = ~mask
         mask = _close(mask, settings.close_gaps)
@@ -229,6 +261,56 @@ def skeleton_to_paths(skeleton: np.ndarray, minimum: int, epsilon: float) -> lis
     return paths
 
 
+def _fit_line(points: list[tuple[float, float]], tolerance: float) -> list[tuple[float, float]] | None:
+    if len(points) < 2:
+        return None
+    values = np.asarray(points, dtype=float)
+    center = values.mean(axis=0)
+    _, _, axes = np.linalg.svd(values - center, full_matrices=False)
+    direction = axes[0]
+    projections = (values - center) @ direction
+    fitted = center + projections[:, None] * direction
+    error = np.linalg.norm(values - fitted, axis=1)
+    if float(error.max(initial=0.0)) > max(0.05, tolerance):
+        return None
+    endpoints = center + np.array([projections.min(), projections.max()])[:, None] * direction
+    return [tuple(endpoints[0]), tuple(endpoints[1])]
+
+
+def _smooth_curve(points: list[tuple[float, float]], iterations: int = 2) -> list[tuple[float, float]]:
+    """Chaikin corner cutting: a stable approximation of a quadratic B-spline."""
+    if len(points) < 3:
+        return points
+    current = np.asarray(points, dtype=float)
+    for _ in range(max(0, iterations)):
+        first = current[:-1]
+        second = current[1:]
+        q = 0.75 * first + 0.25 * second
+        r = 0.25 * first + 0.75 * second
+        interior = np.empty((q.shape[0] * 2, 2), dtype=float)
+        interior[0::2] = q
+        interior[1::2] = r
+        current = np.vstack([current[0], interior, current[-1]])
+    return [tuple(point) for point in current]
+
+
+def recognize_paths(paths: list[list[tuple[float, float]]], mode: str,
+                    line_tolerance: float) -> list[list[tuple[float, float]]]:
+    mode = mode.lower()
+    if mode == "centerline":
+        return paths
+    if mode == "curves":
+        return [_smooth_curve(path) for path in paths]
+    recognized: list[list[tuple[float, float]]] = []
+    for path in paths:
+        line = _fit_line(path, line_tolerance)
+        if line is not None:
+            recognized.append(line)
+        elif mode == "hybrid":
+            recognized.append(_smooth_curve(path))
+    return recognized
+
+
 def _overlay(original: Image.Image, paths: Iterable[Iterable[tuple[float, float]]], scale: float) -> Image.Image:
     from PIL import ImageDraw
 
@@ -248,6 +330,7 @@ def trace_image(image: Image.Image, settings: TraceSettings) -> TraceResult:
     raster, mask, scale = prepare_raster(original, settings)
     thin = skeletonize(mask)
     paths = skeleton_to_paths(thin, settings.min_path_pixels, settings.simplify_pixels)
+    paths = recognize_paths(paths, settings.recognition_mode, settings.line_tolerance)
     skeleton_image = Image.fromarray(np.where(thin, 0, 255).astype(np.uint8), mode="L")
     return TraceResult(
         original=original,
