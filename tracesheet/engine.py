@@ -66,6 +66,50 @@ class SampleSegmentationResult:
     accepted_pixels: int
 
 
+@dataclass
+class StructuralMaps:
+    """Shared numerical analysis used by preview and vector extraction."""
+    fine: np.ndarray
+    medium: np.ndarray
+    large: np.ndarray
+    gradient: np.ndarray
+    probability: np.ndarray
+    texture: np.ndarray
+
+
+@dataclass(frozen=True)
+class ImageProfile:
+    kind: str
+    confidence: float
+    white_fraction: float
+    colorfulness: float
+    edge_density: float
+
+
+def analyze_image_profile(image: Image.Image, maximum: int = 640) -> ImageProfile:
+    """Fast preventive reading used to choose a safe editable starting profile."""
+    if cv2 is None:
+        raise RuntimeError("L'analisi automatica richiede opencv-python-headless.")
+    work, _scale = _resize_for_processing(image.convert("RGB"), maximum)
+    rgb = np.asarray(work, dtype=np.uint8)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    white_fraction = float(np.mean(gray >= 235))
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    colorfulness = float(np.mean(np.linalg.norm(
+        lab[..., 1:].astype(np.float32) - 128.0, axis=2)) / 90.0)
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (0, 0), 1.0), 40, 120)
+    edge_density = float(np.mean(edges > 0))
+    technical = np.clip(0.62 * white_fraction + 0.30 * (1.0 - colorfulness)
+                        + 0.08 * np.clip(edge_density / 0.12, 0, 1), 0, 1)
+    structural = np.clip(0.56 * (1.0 - white_fraction) + 0.34 * colorfulness
+                         + 0.10 * np.clip(edge_density / 0.18, 0, 1), 0, 1)
+    if technical >= structural:
+        return ImageProfile("technical", float(technical), white_fraction,
+                            colorfulness, edge_density)
+    return ImageProfile("structural", float(structural), white_fraction,
+                        colorfulness, edge_density)
+
+
 def _otsu(gray: np.ndarray) -> int:
     hist = np.bincount(gray.ravel(), minlength=256).astype(np.float64)
     total = gray.size
@@ -843,6 +887,88 @@ def _directional_flow_paths(image: Image.Image, settings: TraceSettings
     return raster, thin, paths
 
 
+def _structural_maps(lab: np.ndarray, settings: TraceSettings) -> StructuralMaps:
+    """Compute one reusable structural field instead of independent preview masks."""
+    strength = float(np.clip(settings.structural_strength, 0.05, 0.95))
+    base = max(1.0, float(settings.texture_suppression) / 5.0)
+
+    def scale_edges(sigma: float) -> np.ndarray:
+        blurred = cv2.GaussianBlur(lab, (0, 0), sigma)
+        luminance = cv2.Canny(blurred[..., 0], 24, 68)
+        chroma_a = cv2.Canny(blurred[..., 1], 5, 16)
+        chroma_b = cv2.Canny(blurred[..., 2], 5, 16)
+        return (luminance > 0) | (chroma_a > 0) | (chroma_b > 0)
+
+    fine = scale_edges(max(0.7, base * 0.45))
+    medium = scale_edges(max(1.4, base))
+    large = scale_edges(max(2.8, base * (1.8 + strength)))
+    # A broad chromatic gradient represents the colour difference between
+    # neighbouring pieces; the narrow grain largely cancels at this scale.
+    structural_lab = cv2.GaussianBlur(lab, (0, 0), max(2.0, base * 1.8))
+    gradient = np.zeros(structural_lab.shape[:2], dtype=np.float32)
+    for channel in range(3):
+        gx = cv2.Sobel(structural_lab[..., channel], cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(structural_lab[..., channel], cv2.CV_32F, 0, 1, ksize=3)
+        gradient += gx * gx + gy * gy
+    gradient = np.sqrt(gradient)
+    positive = gradient[gradient > 0]
+    gradient_scale = float(np.percentile(positive, 96)) if positive.size else 1.0
+    gradient_normalized = np.clip(gradient / max(gradient_scale, 1e-6), 0.0, 1.0)
+
+    support_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    medium_support = cv2.dilate(medium.astype(np.uint8), support_kernel).astype(bool)
+    # Responses which exist only at the finest scale are likely wood grain.
+    fine_only = fine & ~medium_support
+    fine_density = cv2.boxFilter(fine.astype(np.float32), -1, (21, 21), normalize=True)
+    dense_texture = np.clip((fine_density - 0.07) / 0.20, 0.0, 1.0)
+    texture = np.maximum(
+        cv2.GaussianBlur(fine_only.astype(np.float32), (0, 0), 1.2),
+        cv2.GaussianBlur(dense_texture, (0, 0), 2.0),
+    )
+    persistent = medium & cv2.dilate(large.astype(np.uint8), support_kernel).astype(bool)
+    probability = (0.07 * fine.astype(np.float32)
+                   + 0.13 * medium.astype(np.float32)
+                   + 0.23 * large.astype(np.float32)
+                   + 0.32 * persistent.astype(np.float32)
+                   + 0.55 * gradient_normalized)
+    texture_weight = 0.30 + 0.90 * np.clip(settings.texture_suppression / 31.0, 0.0, 1.0)
+    probability = np.clip(probability - texture_weight * texture, 0.0, None)
+    probability = cv2.GaussianBlur(probability, (0, 0), 0.85)
+    maximum = float(probability.max(initial=0.0))
+    if maximum > 0:
+        probability /= maximum
+    return StructuralMaps(fine, medium, large, gradient, probability, texture)
+
+
+def _probability_ridge_paths(maps: StructuralMaps, settings: TraceSettings
+                             ) -> tuple[np.ndarray, list[list[tuple[float, float]]]]:
+    """Trace narrow high-confidence valleys in the probability surface."""
+    probability = maps.probability
+    positive = probability[probability > 0]
+    if not positive.size:
+        return np.zeros_like(probability, dtype=bool), []
+    # Structural strength controls confidence, not a binary Canny threshold.
+    percentile = 70.0 + 25.0 * float(np.clip(settings.structural_strength, 0.05, 0.95))
+    level = float(np.percentile(positive, percentile))
+    high = probability >= level
+    # Remove isolated maxima but do not close broad regions: closing was the
+    # principal cause of the cellular/Voronoi-like network in previous builds.
+    high = cv2.morphologyEx(high.astype(np.uint8), cv2.MORPH_OPEN,
+                            np.ones((2, 2), np.uint8)).astype(bool)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(high.astype(np.uint8), 8)
+    cleaned = np.zeros_like(high)
+    minimum_area = max(3, round(settings.min_path_pixels * 0.35))
+    for component in range(1, count):
+        if int(stats[component, cv2.CC_STAT_AREA]) >= minimum_area:
+            cleaned |= labels == component
+    ridge = skeletonize(cleaned)
+    paths = graph_paths_from_skeleton(ridge, settings)
+    ridge_minimum = max(8.0, settings.min_path_pixels * 2.25)
+    paths = [path for path in paths if _path_length(path) >= ridge_minimum]
+    paths = recognize_paths(paths, "curves", settings.line_tolerance)
+    return ridge, paths
+
+
 def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
                                  ) -> tuple[Image.Image, np.ndarray,
                                             list[list[tuple[float, float]]],
@@ -854,18 +980,8 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
     strength = float(np.clip(settings.structural_strength, 0.05, 0.95))
     base = max(1.0, float(settings.texture_suppression) / 5.0)
-
-    def scale_edges(sigma: float) -> np.ndarray:
-        blurred = cv2.GaussianBlur(lab, (0, 0), sigma)
-        # L carries tonal seams; a/b preserve borders between similarly lit woods.
-        luminance = cv2.Canny(blurred[..., 0], 24, 68)
-        chroma_a = cv2.Canny(blurred[..., 1], 5, 16)
-        chroma_b = cv2.Canny(blurred[..., 2], 5, 16)
-        return (luminance > 0) | (chroma_a > 0) | (chroma_b > 0)
-
-    fine = scale_edges(max(0.7, base * 0.45))
-    medium = scale_edges(max(1.4, base))
-    large = scale_edges(max(2.8, base * (1.8 + strength)))
+    maps = _structural_maps(lab, settings)
+    fine, medium, large = maps.fine, maps.medium, maps.large
     radius = max(1, round(1 + strength * 3))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1,) * 2)
     supported_large = cv2.dilate(large.astype(np.uint8), kernel).astype(bool)
@@ -879,13 +995,7 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
 
     # Continuous chromatic evidence supplies weak support where a real seam is
     # partially lost by blur, without automatically promoting wood grain.
-    medium_lab = cv2.GaussianBlur(lab, (0, 0), max(1.2, base))
-    gradient = np.zeros(medium_lab.shape[:2], dtype=np.float32)
-    for channel in range(3):
-        gx = cv2.Sobel(medium_lab[..., channel], cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(medium_lab[..., channel], cv2.CV_32F, 0, 1, ksize=3)
-        gradient += gx * gx + gy * gy
-    gradient = np.sqrt(gradient)
+    gradient = maps.gradient
     positive = gradient[gradient > 0]
     color_limit = float(np.percentile(positive, 78 + strength * 10)) if positive.size else 0.0
     color_support = gradient >= color_limit
@@ -909,11 +1019,14 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
     for component_id in range(1, count):
         if int(stats[component_id, cv2.CC_STAT_AREA]) >= minimum:
             cleaned |= components == component_id
-    primary_thin = skeletonize(cleaned)
-    chains = graph_paths_from_skeleton(primary_thin, settings)
-    primary_paths = recognize_paths(
-        chains, "hybrid" if settings.recognition_mode == "flows"
-        else settings.recognition_mode, settings.line_tolerance)
+    if settings.recognition_mode == "ridges":
+        primary_thin, primary_paths = _probability_ridge_paths(maps, settings)
+    else:
+        primary_thin = skeletonize(cleaned)
+        chains = graph_paths_from_skeleton(primary_thin, settings)
+        primary_paths = recognize_paths(
+            chains, "hybrid" if settings.recognition_mode == "flows"
+            else settings.recognition_mode, settings.line_tolerance)
 
     exclusion = cv2.dilate(cleaned.astype(np.uint8), kernel).astype(bool)
     secondary_mask = fine & ~exclusion
@@ -924,12 +1037,7 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
     raster_array = np.full((*primary.shape, 3), 255, dtype=np.uint8)
     view = settings.structural_view.lower()
     if view == "probability":
-        score = (0.18 * fine.astype(np.float32)
-                 + 0.34 * medium.astype(np.float32)
-                 + 0.34 * large.astype(np.float32))
-        if positive.size:
-            score += 0.28 * np.clip(gradient / max(color_limit, 1e-6), 0.0, 1.0)
-        shade = np.clip(255.0 * (1.0 - score / max(float(score.max()), 1e-6)), 0, 255).astype(np.uint8)
+        shade = np.clip(255.0 * (1.0 - maps.probability), 0, 255).astype(np.uint8)
         raster_array[:] = shade[..., None]
     elif view == "details":
         raster_array[secondary_thin] = (190, 190, 190)

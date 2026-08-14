@@ -5,7 +5,16 @@ vettoriale di scansioni tecniche, planimetrie e fotografie. L'interfaccia ripren
 Windows 2000 modernizzato di Pixel Sheet Converter, mentre motore, release e sviluppo sono
 indipendenti.
 
-Versione corrente: **0.9.0-test**.
+Versione corrente: **0.10.0-test**.
+
+Il motore **Direttrici da probabilità** usa la stessa superficie numerica
+mostrata nell'anteprima e ne estrae le creste ad alta affidabilità. Evita la
+chiusura morfologica delle grandi masse, principale causa del precedente
+reticolo cellulare, e separa la risposta strutturale dalla texture fine.
+
+Il comando **Analizza immagine e scegli profilo** effettua una lettura preventiva
+rapida di fondo, cromaticità e densità dei bordi. Propone quindi un profilo
+tecnico oppure strutturale, mantenendo tutti i valori modificabili.
 
 La versione 0.9 ricompone il grafo dello scheletro prima di applicare il filtro
 di lunghezza. Una linea attraversata da incroci, porte o simboli non viene più

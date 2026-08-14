@@ -9,7 +9,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
-from .engine import TraceResult, TraceSettings, prepare_raster, segment_from_samples, trace_image
+from .engine import (TraceResult, TraceSettings, analyze_image_profile, prepare_raster,
+                     segment_from_samples, trace_image)
 from .exporters import export_dxf, export_raster
 from .version import APP_VERSION
 
@@ -130,6 +131,8 @@ class TraceSheetApp(tk.Tk):
         self.mode_help.pack(anchor="w", pady=(6, 0))
         ttk.Button(box, text="Ripristina preset intarsio",
                    command=self._apply_inlay_preset).pack(fill="x", pady=(6, 0))
+        ttk.Button(box, text="Analizza immagine e scegli profilo",
+                   command=self._apply_automatic_profile).pack(fill="x", pady=(4, 0))
 
         box = ttk.LabelFrame(controls, text="3. Preparazione raster", padding=7)
         box.pack(fill="x", pady=4)
@@ -184,7 +187,7 @@ class TraceSheetApp(tk.Tk):
         ttk.Label(box, text="Motore").grid(row=0, column=0, sticky="w")
         self.recognition_var = tk.StringVar(value="Ibrido")
         recognition_combo = ttk.Combobox(box, state="readonly", textvariable=self.recognition_var,
-                                         values=["Monolinea", "Rette", "Curve morbide", "Ibrido", "Flussi direzionali"], width=18)
+                                         values=["Direttrici da probabilità", "Monolinea", "Rette", "Curve morbide", "Ibrido", "Flussi direzionali"], width=25)
         recognition_combo.grid(row=0, column=1, sticky="e")
         self.recognition_combo = recognition_combo
         recognition_combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_live_preview())
@@ -338,7 +341,7 @@ class TraceSheetApp(tk.Tk):
         self.region_merge_var.set(7.0)
         self.structural_strength_var.set(0.50)
         self.structural_view_var.set("Solo primarie")
-        self.recognition_var.set("Ibrido")
+        self.recognition_var.set("Direttrici da probabilità")
         self.minimum_var.set(10)
         self.simplify_var.set(1.5)
         self.line_tolerance_var.set(1.5)
@@ -347,6 +350,35 @@ class TraceSheetApp(tk.Tk):
         self.flow_angle_var.set(22.0)
         self.preservation_var.set(0.82)
         self._mode_changed()
+
+    def _apply_automatic_profile(self):
+        if self.source_image is None:
+            messagebox.showwarning("Analisi automatica", "Apri prima un'immagine.")
+            return
+        profile = analyze_image_profile(self.source_image)
+        if profile.kind == "technical":
+            self.mode_var.set("Linee centrali")
+            self.threshold_mode_var.set("Otsu automatica")
+            self.recognition_var.set("Ibrido")
+            self.minimum_var.set(7)
+            self.simplify_var.set(1.0)
+            self.flow_gap_var.set(16.0)
+            self.flow_angle_var.set(16.0)
+            self.preservation_var.set(0.88)
+            label = "disegno tecnico"
+        else:
+            self._apply_inlay_preset()
+            self.texture_suppression_var.set(19)
+            self.structural_strength_var.set(0.60)
+            self.minimum_var.set(20)
+            self.simplify_var.set(2.0)
+            self.flow_gap_var.set(20.0)
+            self.flow_angle_var.set(16.0)
+            self.preservation_var.set(0.42)
+            label = "fotografia / struttura cromatica"
+        self._mode_changed()
+        self.status_label.configure(
+            text=f"Profilo suggerito: {label} (confidenza {profile.confidence:.0%}).")
 
     def _threshold_mode_changed(self, schedule=True):
         threshold_active = self.mode_var.get() in {"Linee centrali", "Analisi combinata"}
@@ -430,7 +462,8 @@ class TraceSheetApp(tk.Tk):
         threshold_modes = {"Manuale": "manual", "Otsu automatica": "otsu", "Sauvola locale": "sauvola"}
         recognition_modes = {"Monolinea": "centerline", "Rette": "lines",
                              "Curve morbide": "curves", "Ibrido": "hybrid",
-                             "Flussi direzionali": "flows"}
+                             "Flussi direzionali": "flows",
+                             "Direttrici da probabilità": "ridges"}
         threshold_mode = threshold_modes[self.threshold_mode_var.get()]
         mode_names = {"Linee centrali": "centerline",
                       "Contorni delle sagome": "contours",

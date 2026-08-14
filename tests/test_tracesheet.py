@@ -4,7 +4,8 @@ import numpy as np
 import ezdxf
 from PIL import Image, ImageDraw
 
-from tracesheet.engine import (TraceResult, TraceSettings, merge_coherent_paths, prepare_raster,
+from tracesheet.engine import (TraceResult, TraceSettings, analyze_image_profile,
+                               merge_coherent_paths, prepare_raster,
                                graph_paths_from_skeleton, segment_from_samples, skeletonize,
                                trace_image)
 from tracesheet.exporters import export_dxf
@@ -211,3 +212,30 @@ def test_low_preservation_discards_isolated_short_noise():
     assert paths
     assert all(_path_span >= 10 for _path_span in
                [max(p[-1][0], p[0][0]) - min(p[-1][0], p[0][0]) for p in paths])
+
+
+def test_probability_ridges_keep_major_seam_and_reduce_texture_network():
+    image = Image.new("RGB", (220, 140), "#d8aa72")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((110, 0, 219, 139), fill="#704126")
+    for y in range(5, 138, 5):
+        draw.line((4, y, 104, y + 2), fill="#bd8e5c", width=1)
+        draw.line((116, y, 215, y + 2), fill="#875434", width=1)
+    common = dict(mode="structural", texture_suppression=19,
+                  structural_strength=0.55, min_path_pixels=8,
+                  simplify_pixels=1.2, skeleton_preservation=0.55)
+    ridges = trace_image(image, TraceSettings(recognition_mode="ridges", **common))
+    legacy = trace_image(image, TraceSettings(recognition_mode="curves", **common))
+    assert ridges.paths
+    assert len(ridges.paths) <= len(legacy.paths)
+    assert any(max(point[1] for point in path) - min(point[1] for point in path) > 70
+               for path in ridges.paths)
+
+
+def test_preventive_analysis_distinguishes_plan_from_colour_photo():
+    plan = Image.new("RGB", (200, 120), "white")
+    ImageDraw.Draw(plan).rectangle((20, 20, 180, 100), outline="black", width=2)
+    photo = Image.new("RGB", (200, 120), "#b97943")
+    ImageDraw.Draw(photo).rectangle((100, 0, 199, 119), fill="#5e321f")
+    assert analyze_image_profile(plan).kind == "technical"
+    assert analyze_image_profile(photo).kind == "structural"
