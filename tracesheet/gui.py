@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from dataclasses import replace
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -32,6 +33,8 @@ class TraceSheetApp(tk.Tk):
         self.prepared_settings: TraceSettings | None = None
         self.preview_refs: dict[str, ImageTk.PhotoImage] = {}
         self.events: queue.Queue = queue.Queue()
+        self.live_after_id: str | None = None
+        self.live_token = 0
         self._style()
         self._ui()
         self.after(100, self._poll)
@@ -123,31 +126,50 @@ class TraceSheetApp(tk.Tk):
 
         box = ttk.LabelFrame(controls, text="3. Preparazione raster", padding=7)
         box.pack(fill="x", pady=4)
-        self.auto_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(box, text="Soglia automatica", variable=self.auto_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(box, text="Metodo soglia").grid(row=0, column=0, sticky="w")
+        self.threshold_mode_var = tk.StringVar(value="Otsu automatica")
+        threshold_combo = ttk.Combobox(box, state="readonly", textvariable=self.threshold_mode_var,
+                                       values=["Manuale", "Otsu automatica", "Sauvola locale"], width=17)
+        threshold_combo.grid(row=0, column=1, sticky="e")
+        threshold_combo.bind("<<ComboboxSelected>>", lambda _e: self._threshold_mode_changed())
         self.threshold_var = tk.IntVar(value=185)
-        self._row_scale(box, 1, "Soglia", self.threshold_var, 0, 255)
+        self.threshold_row = self._row_scale(box, 1, "Soglia", self.threshold_var, 0, 255)
+        self.sauvola_window_var = tk.IntVar(value=31)
+        self.sauvola_row = self._row_scale(box, 2, "Finestra Sauvola", self.sauvola_window_var, 9, 81)
         self.contrast_var = tk.DoubleVar(value=1.25)
-        self._row_scale(box, 2, "Contrasto", self.contrast_var, 0.2, 3.0)
+        self._row_scale(box, 3, "Contrasto", self.contrast_var, 0.2, 3.0)
         self.blur_var = tk.DoubleVar(value=0.6)
-        self._row_scale(box, 3, "Riduzione rumore", self.blur_var, 0.0, 3.0)
+        self._row_scale(box, 4, "Riduzione rumore", self.blur_var, 0.0, 3.0)
         self.close_var = tk.IntVar(value=1)
-        self._row_scale(box, 4, "Chiudi interruzioni", self.close_var, 0, 3)
+        self._row_scale(box, 5, "Chiudi interruzioni", self.close_var, 0, 3)
         self.invert_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(box, text="Inverti bianco/nero", variable=self.invert_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        invert_check = ttk.Checkbutton(box, text="Inverti bianco/nero", variable=self.invert_var,
+                                       command=self._schedule_live_preview)
+        invert_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.colors_var = tk.IntVar(value=8)
-        self.colors_row = self._row_scale(box, 6, "Aree cromatiche", self.colors_var, 2, 24)
+        self.colors_row = self._row_scale(box, 7, "Aree cromatiche", self.colors_var, 2, 24)
+        self.live_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(box, text="Anteprima in tempo reale", variable=self.live_var,
+                        command=self._schedule_live_preview).grid(row=8, column=0, columnspan=2, sticky="w", pady=(5, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="4. Geometria", padding=7)
         box.pack(fill="x", pady=4)
+        ttk.Label(box, text="Motore").grid(row=0, column=0, sticky="w")
+        self.recognition_var = tk.StringVar(value="Ibrido")
+        recognition_combo = ttk.Combobox(box, state="readonly", textvariable=self.recognition_var,
+                                         values=["Monolinea", "Rette", "Curve morbide", "Ibrido"], width=14)
+        recognition_combo.grid(row=0, column=1, sticky="e")
+        recognition_combo.bind("<<ComboboxSelected>>", lambda _e: self._schedule_live_preview())
         self.minimum_var = tk.IntVar(value=8)
-        self._row_scale(box, 0, "Tratto minimo (px)", self.minimum_var, 2, 80)
+        self._row_scale(box, 1, "Tratto minimo (px)", self.minimum_var, 2, 80)
         self.simplify_var = tk.DoubleVar(value=1.5)
-        self._row_scale(box, 1, "Semplificazione", self.simplify_var, 0.0, 8.0)
+        self._row_scale(box, 2, "Semplificazione", self.simplify_var, 0.0, 8.0)
+        self.line_tolerance_var = tk.DoubleVar(value=1.5)
+        self._row_scale(box, 3, "Tolleranza rette", self.line_tolerance_var, 0.2, 6.0)
         self.mm_var = tk.DoubleVar(value=1.0)
-        ttk.Label(box, text="Scala (mm per pixel)").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Spinbox(box, from_=0.001, to=1000, increment=0.01, textvariable=self.mm_var, width=10).grid(row=2, column=1, sticky="e", pady=(6, 0))
+        ttk.Label(box, text="Scala (mm per pixel)").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Spinbox(box, from_=0.001, to=1000, increment=0.01, textvariable=self.mm_var, width=10).grid(row=4, column=1, sticky="e", pady=(6, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="5. Elaborazione", padding=7)
@@ -181,13 +203,25 @@ class TraceSheetApp(tk.Tk):
         self.status_label = tk.Label(status, text="Pronto", font=("Tahoma", 8), background=self.FACE, anchor="w", padx=4, pady=2)
         self.status_label.pack(fill="x")
         self._mode_changed()
+        self._threshold_mode_changed(schedule=False)
 
     def _row_scale(self, parent, row, text, variable, start, end):
         label = ttk.Label(parent, text=text)
         label.grid(row=row, column=0, sticky="w", pady=(4, 0))
-        scale = ttk.Scale(parent, from_=start, to=end, variable=variable)
+        scale = ttk.Scale(parent, from_=start, to=end, variable=variable,
+                          command=lambda _value: self._schedule_live_preview())
         scale.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
         return label, scale
+
+    def _threshold_mode_changed(self, schedule=True):
+        manual = self.threshold_mode_var.get() == "Manuale"
+        sauvola = self.threshold_mode_var.get() == "Sauvola locale"
+        for widget in self.threshold_row:
+            widget.configure(state="normal" if manual else "disabled")
+        for widget in self.sauvola_row:
+            widget.configure(state="normal" if sauvola else "disabled")
+        if schedule:
+            self._schedule_live_preview()
 
     def _mode_changed(self):
         contours = self.mode_var.get() == "Contorni delle sagome"
@@ -200,6 +234,7 @@ class TraceSheetApp(tk.Tk):
             self.blur_var.set(2.0)
         elif not contours and self.blur_var.get() > 1.5:
             self.blur_var.set(0.6)
+        self._schedule_live_preview()
 
     def about(self):
         messagebox.showinfo("Trace Sheet Studio", f"Trace Sheet Studio {APP_VERSION}\n\nAnteprima raster, ricalco monolinea e DXF.\nInterfaccia Windows 2000 modernizzata.\n\nLicenza MIT")
@@ -225,16 +260,61 @@ class TraceSheetApp(tk.Tk):
         self.file_label.configure(text=f"{self.source_path.name}\n{self.source_image.width} × {self.source_image.height} px")
         self._set_image("original", self.source_image)
         self.status_label.configure(text="Immagine caricata. Regola i parametri e genera il ricalco.")
+        self._schedule_live_preview(immediate=True)
 
     def _settings(self):
+        threshold_modes = {"Manuale": "manual", "Otsu automatica": "otsu", "Sauvola locale": "sauvola"}
+        recognition_modes = {"Monolinea": "centerline", "Rette": "lines",
+                             "Curve morbide": "curves", "Ibrido": "hybrid"}
+        threshold_mode = threshold_modes[self.threshold_mode_var.get()]
         return TraceSettings(
             mode="contours" if self.mode_var.get() == "Contorni delle sagome" else "centerline",
-            threshold=round(self.threshold_var.get()), automatic_threshold=self.auto_var.get(),
+            threshold_mode=threshold_mode,
+            threshold=round(self.threshold_var.get()), automatic_threshold=threshold_mode == "otsu",
+            sauvola_window=round(self.sauvola_window_var.get()),
             invert=self.invert_var.get(), contrast=float(self.contrast_var.get()),
             blur_radius=float(self.blur_var.get()), close_gaps=round(self.close_var.get()),
             min_path_pixels=round(self.minimum_var.get()), simplify_pixels=float(self.simplify_var.get()),
+            recognition_mode=recognition_modes[self.recognition_var.get()],
+            line_tolerance=float(self.line_tolerance_var.get()),
             colors=round(self.colors_var.get()),
         )
+
+    def _schedule_live_preview(self, immediate=False):
+        if self.source_image is None:
+            return
+        self.prepared_raster = None
+        self.prepared_settings = None
+        self.result = None
+        if hasattr(self, "trace_button"):
+            self.trace_button.configure(state="disabled")
+            self.trace_toolbar.configure(state="disabled")
+            self.raster_toolbar.configure(state="disabled")
+            self.dxf_toolbar.configure(state="disabled")
+        if not hasattr(self, "live_var") or not self.live_var.get():
+            self.status_label.configure(text="Parametri modificati. Prepara nuovamente il raster.")
+            return
+        if self.live_after_id is not None:
+            self.after_cancel(self.live_after_id)
+        delay = 1 if immediate else 180
+        self.live_after_id = self.after(delay, self._start_live_preview)
+
+    def _start_live_preview(self):
+        self.live_after_id = None
+        if self.source_image is None:
+            return
+        self.live_token += 1
+        token = self.live_token
+        settings = replace(self._settings(), max_dimension=900)
+        image = self.source_image.copy()
+        threading.Thread(target=self._live_worker, args=(token, image, settings), daemon=True).start()
+
+    def _live_worker(self, token, image, settings):
+        try:
+            raster, _mask, scale = prepare_raster(image, settings)
+            self.events.put(("live", (token, raster, scale, settings)))
+        except Exception as exc:
+            self.events.put(("live_error", (token, exc)))
 
     def start_prepare(self):
         if self.source_image is None:
@@ -281,6 +361,22 @@ class TraceSheetApp(tk.Tk):
                 if kind == "error":
                     messagebox.showerror("Ricalco", str(payload))
                     self.status_label.configure(text="Errore durante il ricalco")
+                elif kind == "live":
+                    token, raster, scale, settings = payload
+                    if token != self.live_token:
+                        continue
+                    self._set_image("raster", raster)
+                    black = 100.0 * raster.histogram()[0] / (raster.width * raster.height)
+                    mode = settings.threshold_mode.capitalize()
+                    if settings.threshold_mode == "manual":
+                        mode += f" {settings.threshold}"
+                    self.summary.configure(text=f"{mode} | nero {black:.1f}% | anteprima {scale:.3f}")
+                    self.status_label.configure(text="Anteprima raster aggiornata in tempo reale.")
+                    self.notebook.select(1)
+                elif kind == "live_error":
+                    token, _exc = payload
+                    if token == self.live_token:
+                        self.status_label.configure(text="Impossibile aggiornare l'anteprima rapida")
                 elif kind == "prepared":
                     self.prepared_raster, scale, self.prepared_settings = payload
                     self.result = None
