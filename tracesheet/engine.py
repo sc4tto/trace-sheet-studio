@@ -46,6 +46,15 @@ class TraceResult:
     source_size: tuple[int, int]
 
 
+@dataclass
+class SampleSegmentationResult:
+    mask: Image.Image
+    overlay: Image.Image
+    contour: Image.Image
+    paths: list[list[tuple[float, float]]]
+    accepted_pixels: int
+
+
 def _otsu(gray: np.ndarray) -> int:
     hist = np.bincount(gray.ravel(), minlength=256).astype(np.float64)
     total = gray.size
@@ -211,6 +220,117 @@ def _sauvola(gray: np.ndarray, window: int, k: float) -> np.ndarray:
     mean, deviation = _box_statistics(gray, window)
     local_threshold = mean * (1.0 + float(k) * (deviation / 128.0 - 1.0))
     return gray < local_threshold
+
+
+def _rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
+    values = rgb.astype(np.float64) / 255.0
+    linear = np.where(values <= 0.04045, values / 12.92,
+                      ((values + 0.055) / 1.055) ** 2.4)
+    r, g, b = linear[..., 0], linear[..., 1], linear[..., 2]
+    l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+    m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+    s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+    l_, m_, s_ = np.cbrt(l), np.cbrt(m), np.cbrt(s)
+    return np.stack([
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    ], axis=-1)
+
+
+def _sample_design(points: np.ndarray, width: int, height: int, linear: bool) -> np.ndarray:
+    if not linear:
+        return np.ones((len(points), 1), dtype=np.float64)
+    return np.column_stack([
+        np.ones(len(points)), points[:, 0] / max(1, width - 1),
+        points[:, 1] / max(1, height - 1),
+    ])
+
+
+def segment_from_samples(image: Image.Image,
+                         positive_points: list[tuple[int, int]],
+                         negative_points: list[tuple[int, int]] | None = None,
+                         tolerance: float = 0.055,
+                         linear_gradient: bool = True,
+                         edge_weight: float = 0.35,
+                         close_gaps: int = 2,
+                         simplify_pixels: float = 2.0) -> SampleSegmentationResult:
+    """Grow a connected OKLab region from user samples using a fitted local gradient."""
+    if not positive_points:
+        raise ValueError("Aggiungi almeno un campione positivo.")
+    if linear_gradient and len(positive_points) < 3:
+        raise ValueError("Il gradiente lineare richiede almeno tre campioni positivi.")
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    height, width = rgb.shape[:2]
+    positive = np.asarray(positive_points, dtype=np.int32)
+    if np.any(positive[:, 0] < 0) or np.any(positive[:, 0] >= width) or \
+            np.any(positive[:, 1] < 0) or np.any(positive[:, 1] >= height):
+        raise ValueError("Un campione positivo si trova fuori dall'immagine.")
+    oklab = _rgb_to_oklab(rgb)
+    sample_colors = oklab[positive[:, 1], positive[:, 0]]
+    design = _sample_design(positive, width, height, linear_gradient)
+    coefficients, *_ = np.linalg.lstsq(design, sample_colors, rcond=None)
+    yy, xx = np.mgrid[0:height, 0:width]
+    if linear_gradient:
+        expected = coefficients[0] + coefficients[1] * (xx[..., None] / max(1, width - 1)) \
+            + coefficients[2] * (yy[..., None] / max(1, height - 1))
+    else:
+        expected = np.broadcast_to(coefficients[0], oklab.shape)
+    residual = np.linalg.norm(oklab - expected, axis=2)
+    luminance = oklab[..., 0]
+    gx = np.zeros_like(luminance)
+    gy = np.zeros_like(luminance)
+    gx[:, 1:] = np.abs(np.diff(luminance, axis=1))
+    gy[1:, :] = np.abs(np.diff(luminance, axis=0))
+    edge = np.maximum(gx, gy)
+    score = residual + max(0.0, edge_weight) * edge
+    candidate = score <= max(0.001, tolerance)
+    for x, y in positive_points:
+        candidate[y, x] = True
+    if negative_points:
+        for x, y in negative_points:
+            if 0 <= x < width and 0 <= y < height:
+                candidate[y, x] = False
+                radius = 3
+                candidate[max(0, y-radius):min(height, y+radius+1),
+                          max(0, x-radius):min(width, x+radius+1)] = False
+    seeds = np.zeros((height + 2, width + 2), dtype=np.uint8)
+    flood_source = np.where(candidate, 255, 0).astype(np.uint8)
+    connected = np.zeros_like(candidate)
+    for x, y in positive_points:
+        if connected[y, x]:
+            continue
+        component = flood_source.copy()
+        cv2.floodFill(component, seeds.copy(), (int(x), int(y)), 128)
+        connected |= component == 128
+    if close_gaps > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_gaps * 2 + 1,) * 2)
+        connected = cv2.morphologyEx(connected.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
+    binary = np.where(connected, 255, 0).astype(np.uint8)
+    contours, _hierarchy = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    paths: list[list[tuple[float, float]]] = []
+    for contour in contours:
+        if cv2.contourArea(contour) < 4:
+            continue
+        approximated = cv2.approxPolyDP(contour, max(0.1, simplify_pixels), True)
+        path = [(float(item[0][0]), float(item[0][1])) for item in approximated]
+        if len(path) >= 3:
+            path.append(path[0])
+            paths.append(path)
+    overlay = image.convert("RGB").copy()
+    overlay_array = np.asarray(overlay).copy()
+    tint = np.array([255, 60, 40], dtype=np.float64)
+    overlay_array[connected] = (0.55 * overlay_array[connected] + 0.45 * tint).astype(np.uint8)
+    overlay = Image.fromarray(overlay_array)
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(overlay)
+    for path in paths:
+        draw.line(path, fill=(255, 0, 0), width=2, joint="curve")
+    contour_image = Image.fromarray(np.where(connected, 0, 255).astype(np.uint8), mode="L")
+    return SampleSegmentationResult(
+        mask=Image.fromarray(binary, mode="L"), overlay=overlay,
+        contour=contour_image, paths=paths, accepted_pixels=int(connected.sum()),
+    )
 
 
 def prepare_raster(image: Image.Image, settings: TraceSettings) -> tuple[Image.Image, np.ndarray, float]:
