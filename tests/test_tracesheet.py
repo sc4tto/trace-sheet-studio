@@ -3,7 +3,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from tracesheet.engine import TraceSettings, prepare_raster, skeletonize, trace_image
+from tracesheet.engine import (TraceSettings, prepare_raster, segment_from_samples,
+                               skeletonize, trace_image)
 from tracesheet.exporters import export_dxf
 
 
@@ -60,3 +61,18 @@ def test_lines_mode_returns_two_point_entities():
     )
     assert result.paths
     assert all(len(path) == 2 for path in result.paths)
+
+
+def test_sample_gradient_grows_connected_region():
+    image = np.full((90, 140, 3), 235, dtype=np.uint8)
+    for x in range(20, 120):
+        shade = 80 + round((x - 20) * 0.7)
+        image[20:70, x] = (shade + 30, shade + 10, shade)
+    result = segment_from_samples(
+        Image.fromarray(image), [(30, 30), (70, 45), (110, 60)],
+        [(10, 10)], tolerance=0.08, linear_gradient=True,
+    )
+    mask = np.asarray(result.mask)
+    assert mask[45, 70] == 255
+    assert mask[10, 10] == 0
+    assert result.paths
