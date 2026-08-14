@@ -148,9 +148,13 @@ class TraceSheetApp(tk.Tk):
         invert_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.colors_var = tk.IntVar(value=8)
         self.colors_row = self._row_scale(box, 7, "Aree cromatiche", self.colors_var, 2, 24)
+        self.region_color_var = tk.IntVar(value=28)
+        self.region_color_row = self._row_scale(box, 8, "Differenza colore", self.region_color_var, 5, 80)
+        self.min_region_var = tk.IntVar(value=100)
+        self.min_region_row = self._row_scale(box, 9, "Area minima", self.min_region_var, 10, 2000)
         self.live_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(box, text="Anteprima in tempo reale", variable=self.live_var,
-                        command=self._schedule_live_preview).grid(row=8, column=0, columnspan=2, sticky="w", pady=(5, 0))
+                        command=self._schedule_live_preview).grid(row=10, column=0, columnspan=2, sticky="w", pady=(5, 0))
         box.columnconfigure(1, weight=1)
 
         box = ttk.LabelFrame(controls, text="4. Geometria", padding=7)
@@ -228,8 +232,9 @@ class TraceSheetApp(tk.Tk):
         self.mode_help.configure(text=("Per intarsi, campiture e confini fra aree cromatiche."
                                        if contours else "Per planimetrie, aste e disegni tecnici."))
         state = "normal" if contours else "disabled"
-        for widget in self.colors_row:
-            widget.configure(state=state)
+        for row in (self.colors_row, self.region_color_row, self.min_region_row):
+            for widget in row:
+                widget.configure(state=state)
         if contours and self.blur_var.get() < 2.0:
             self.blur_var.set(2.0)
         elif not contours and self.blur_var.get() > 1.5:
@@ -278,6 +283,8 @@ class TraceSheetApp(tk.Tk):
             recognition_mode=recognition_modes[self.recognition_var.get()],
             line_tolerance=float(self.line_tolerance_var.get()),
             colors=round(self.colors_var.get()),
+            region_color_radius=round(self.region_color_var.get()),
+            min_region_area=round(self.min_region_var.get()),
         )
 
     def _schedule_live_preview(self, immediate=False):
@@ -305,7 +312,8 @@ class TraceSheetApp(tk.Tk):
             return
         self.live_token += 1
         token = self.live_token
-        settings = replace(self._settings(), max_dimension=900)
+        maximum = 650 if self.mode_var.get() == "Contorni delle sagome" else 900
+        settings = replace(self._settings(), max_dimension=maximum)
         image = self.source_image.copy()
         threading.Thread(target=self._live_worker, args=(token, image, settings), daemon=True).start()
 
@@ -366,11 +374,15 @@ class TraceSheetApp(tk.Tk):
                     if token != self.live_token:
                         continue
                     self._set_image("raster", raster)
-                    black = 100.0 * raster.histogram()[0] / (raster.width * raster.height)
-                    mode = settings.threshold_mode.capitalize()
-                    if settings.threshold_mode == "manual":
-                        mode += f" {settings.threshold}"
-                    self.summary.configure(text=f"{mode} | nero {black:.1f}% | anteprima {scale:.3f}")
+                    if settings.mode == "contours":
+                        description = f"Regioni {settings.colors} colori | area ≥ {settings.min_region_area} px"
+                    else:
+                        black = 100.0 * raster.histogram()[0] / (raster.width * raster.height)
+                        description = settings.threshold_mode.capitalize()
+                        if settings.threshold_mode == "manual":
+                            description += f" {settings.threshold}"
+                        description += f" | nero {black:.1f}%"
+                    self.summary.configure(text=f"{description} | anteprima {scale:.3f}")
                     self.status_label.configure(text="Anteprima raster aggiornata in tempo reale.")
                     self.notebook.select(1)
                 elif kind == "live_error":
