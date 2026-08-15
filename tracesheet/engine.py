@@ -679,6 +679,71 @@ def _path_length(points: list[tuple[float, float]]) -> float:
     return float(np.linalg.norm(np.diff(values, axis=0), axis=1).sum())
 
 
+def _collapse_micro_loops(points: list[tuple[float, float]], maximum_loop: float,
+                          contact_tolerance: float) -> list[tuple[float, float]]:
+    """Remove short returns created while walking a multi-pixel junction.
+
+    A real ornamental loop is normally long and spatially deliberate.  The
+    export artifacts instead leave a point, travel a few pixels around the
+    junction cluster and return almost to the same position.  Collapse only
+    those local returns before curve fitting, otherwise smoothing turns them
+    into the conspicuous curls visible in CAD.
+    """
+    if len(points) < 5:
+        return points
+    result = list(points)
+    changed = True
+    while changed and len(result) >= 5:
+        changed = False
+        values = np.asarray(result, dtype=float)
+        segment_lengths = np.linalg.norm(np.diff(values, axis=0), axis=1)
+        cumulative = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+        for first in range(len(result) - 4):
+            # Prefer the furthest valid return so nested pixels disappear in
+            # one operation. Keep at least three edges between contacts.
+            for second in range(len(result) - 1, first + 3, -1):
+                excursion = float(cumulative[second] - cumulative[first])
+                if excursion > maximum_loop:
+                    continue
+                gap = float(np.linalg.norm(values[second] - values[first]))
+                if gap > contact_tolerance:
+                    continue
+                midpoint = tuple((values[first] + values[second]) * 0.5)
+                result = result[:first] + [midpoint] + result[second + 1:]
+                changed = True
+                break
+            if changed:
+                break
+    return result
+
+
+def clean_topological_artifacts(paths: list[list[tuple[float, float]]],
+                                settings: TraceSettings
+                                ) -> list[list[tuple[float, float]]]:
+    """Conservatively remove junction curls without erasing major curves."""
+    preservation = float(np.clip(settings.skeleton_preservation, 0.0, 1.0))
+    maximum_loop = max(8.0, settings.min_path_pixels * (2.2 - 0.9 * preservation))
+    contact = max(1.25, min(3.5, settings.simplify_pixels * 1.4 + 0.8))
+    cleaned: list[list[tuple[float, float]]] = []
+    for path in paths:
+        candidate = _collapse_micro_loops(path, maximum_loop, contact)
+        if len(candidate) < 2:
+            continue
+        length = _path_length(candidate)
+        values = np.asarray(candidate, dtype=float)
+        span = float(np.linalg.norm(values.max(axis=0) - values.min(axis=0)))
+        endpoint_gap = float(np.linalg.norm(values[-1] - values[0]))
+        # Discard only compact closed knots. Large closed contours and long
+        # ornamental curls remain untouched.
+        compact_knot = (length <= maximum_loop * 1.35
+                        and span <= max(5.0, maximum_loop * 0.45)
+                        and endpoint_gap <= contact * 1.5)
+        if compact_knot:
+            continue
+        cleaned.append(candidate)
+    return cleaned
+
+
 def graph_paths_from_skeleton(skeleton: np.ndarray, settings: TraceSettings
                               ) -> list[list[tuple[float, float]]]:
     """Recompose a skeleton graph before discarding its short half-edges.
@@ -695,9 +760,12 @@ def graph_paths_from_skeleton(skeleton: np.ndarray, settings: TraceSettings
         skeleton, extraction_minimum, max(0.15, settings.simplify_pixels * 0.35))
     if not fragments:
         return []
+    # Junction pairing must remain local. A large general-purpose gap value
+    # used here used to bridge neighbouring arms and create triangles/loops.
+    junction_gap = min(4.5, max(1.5, settings.flow_gap * (0.12 + 0.16 * preservation)))
     joined = _join_boundary_strokes(
-        fragments, settings.generator_angle,
-        max(1.5, settings.flow_gap * (0.18 + 0.34 * preservation)))
+        fragments, settings.generator_angle, junction_gap)
+    joined = clean_topological_artifacts(joined, settings)
     minimum_length = max(1.5, settings.min_path_pixels * (1.15 - preservation))
     paths: list[list[tuple[float, float]]] = []
     for path in joined:
