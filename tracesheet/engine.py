@@ -984,6 +984,30 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
     fine, medium, large = maps.fine, maps.medium, maps.large
     radius = max(1, round(1 + strength * 3))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1,) * 2)
+
+    # Probability ridges already derive their primary geometry from the
+    # shared structural field. Do not also build the legacy hysteresis mask:
+    # it was a full second extraction pass whose result was then discarded.
+    if settings.recognition_mode == "ridges":
+        primary_thin, primary_paths = _probability_ridge_paths(maps, settings)
+        secondary_paths: list[list[tuple[float, float]]] = []
+        secondary_thin = np.zeros_like(primary_thin)
+        if settings.structural_view.lower() == "details":
+            exclusion = cv2.dilate(primary_thin.astype(np.uint8), kernel).astype(bool)
+            secondary_thin = skeletonize(fine & ~exclusion)
+            secondary_paths = skeleton_to_paths(
+                secondary_thin, max(settings.min_path_pixels * 2, 12),
+                max(settings.simplify_pixels, 1.5))
+        raster_array = np.full((*primary_thin.shape, 3), 255, dtype=np.uint8)
+        if settings.structural_view.lower() == "probability":
+            shade = np.clip(255.0 * (1.0 - maps.probability), 0, 255).astype(np.uint8)
+            raster_array[:] = shade[..., None]
+        elif settings.structural_view.lower() == "details":
+            raster_array[secondary_thin] = (190, 190, 190)
+        raster_array[primary_thin] = (0, 0, 0)
+        return (Image.fromarray(raster_array, mode="RGB"), primary_thin,
+                primary_paths, secondary_paths)
+
     supported_large = cv2.dilate(large.astype(np.uint8), kernel).astype(bool)
     supported_medium = cv2.dilate(medium.astype(np.uint8), kernel).astype(bool)
     strong = medium & supported_large
@@ -1019,21 +1043,21 @@ def _multiscale_structural_paths(image: Image.Image, settings: TraceSettings
     for component_id in range(1, count):
         if int(stats[component_id, cv2.CC_STAT_AREA]) >= minimum:
             cleaned |= components == component_id
-    if settings.recognition_mode == "ridges":
-        primary_thin, primary_paths = _probability_ridge_paths(maps, settings)
-    else:
-        primary_thin = skeletonize(cleaned)
-        chains = graph_paths_from_skeleton(primary_thin, settings)
-        primary_paths = recognize_paths(
-            chains, "hybrid" if settings.recognition_mode == "flows"
-            else settings.recognition_mode, settings.line_tolerance)
+    primary_thin = skeletonize(cleaned)
+    chains = graph_paths_from_skeleton(primary_thin, settings)
+    primary_paths = recognize_paths(
+        chains, "hybrid" if settings.recognition_mode == "flows"
+        else settings.recognition_mode, settings.line_tolerance)
 
-    exclusion = cv2.dilate(cleaned.astype(np.uint8), kernel).astype(bool)
-    secondary_mask = fine & ~exclusion
-    secondary_thin = skeletonize(secondary_mask)
-    secondary_paths = skeleton_to_paths(
-        secondary_thin, max(settings.min_path_pixels * 2, 12),
-        max(settings.simplify_pixels, 1.5))
+    secondary_paths: list[list[tuple[float, float]]] = []
+    secondary_thin = np.zeros_like(primary_thin)
+    if settings.structural_view.lower() == "details":
+        exclusion = cv2.dilate(cleaned.astype(np.uint8), kernel).astype(bool)
+        secondary_mask = fine & ~exclusion
+        secondary_thin = skeletonize(secondary_mask)
+        secondary_paths = skeleton_to_paths(
+            secondary_thin, max(settings.min_path_pixels * 2, 12),
+            max(settings.simplify_pixels, 1.5))
     raster_array = np.full((*primary.shape, 3), 255, dtype=np.uint8)
     view = settings.structural_view.lower()
     if view == "probability":
