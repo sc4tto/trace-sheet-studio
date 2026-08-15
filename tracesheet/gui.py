@@ -41,6 +41,9 @@ class TraceSheetApp(tk.Tk):
         self.events: queue.Queue = queue.Queue()
         self.live_after_id: str | None = None
         self.live_token = 0
+        self.live_busy = False
+        self.live_pending = None
+        self.live_lock = threading.Lock()
         self._style()
         self._ui()
         self.after(100, self._poll)
@@ -525,7 +528,9 @@ class TraceSheetApp(tk.Tk):
             return
         if self.live_after_id is not None:
             self.after_cancel(self.live_after_id)
-        delay = 1 if immediate else 180
+        # A slightly longer debounce prevents a complete trace for every
+        # intermediate slider position while keeping the UI responsive.
+        delay = 1 if immediate else 300
         self.live_after_id = self.after(delay, self._start_live_preview)
 
     def _start_live_preview(self):
@@ -542,14 +547,32 @@ class TraceSheetApp(tk.Tk):
                 "Ricalco strutturale"} else 750
         settings = replace(self._settings(), max_dimension=maximum)
         image = self.source_image.copy()
-        threading.Thread(target=self._live_worker, args=(token, image, settings), daemon=True).start()
+        request = (token, image, settings)
+        with self.live_lock:
+            if self.live_busy:
+                # Keep only the most recent request. The running OpenCV call
+                # cannot be interrupted safely, but obsolete previews no
+                # longer accumulate as concurrent CPU-heavy threads.
+                self.live_pending = request
+                self.status_label.configure(text="Aggiornamento accodato: uso gli ultimi parametri...")
+                return
+            self.live_busy = True
+        threading.Thread(target=self._live_worker, args=request, daemon=True).start()
 
     def _live_worker(self, token, image, settings):
-        try:
-            result = trace_image(image, settings)
-            self.events.put(("live", (token, result, settings)))
-        except Exception as exc:
-            self.events.put(("live_error", (token, exc)))
+        request = (token, image, settings)
+        while request is not None:
+            token, image, settings = request
+            try:
+                result = trace_image(image, settings)
+                self.events.put(("live", (token, result, settings)))
+            except Exception as exc:
+                self.events.put(("live_error", (token, exc)))
+            with self.live_lock:
+                request = self.live_pending
+                self.live_pending = None
+                if request is None:
+                    self.live_busy = False
 
     def start_prepare(self):
         if self.source_image is None:
