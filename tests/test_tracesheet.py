@@ -5,7 +5,7 @@ import ezdxf
 from PIL import Image, ImageDraw
 
 from tracesheet.engine import (TraceResult, TraceSettings, analyze_image_profile,
-                               merge_coherent_paths, prepare_raster,
+                               clean_topological_artifacts, merge_coherent_paths, prepare_raster,
                                graph_paths_from_skeleton, segment_from_samples, skeletonize,
                                trace_image)
 from tracesheet.exporters import export_dxf
@@ -212,6 +212,26 @@ def test_low_preservation_discards_isolated_short_noise():
     assert paths
     assert all(_path_span >= 10 for _path_span in
                [max(p[-1][0], p[0][0]) - min(p[-1][0], p[0][0]) for p in paths])
+
+
+def test_topology_cleanup_collapses_small_junction_curl_but_keeps_main_stroke():
+    path = [(0, 10), (10, 10), (20, 10), (22, 8), (24, 10),
+            (22, 12), (20.5, 10.5), (30, 10), (45, 10)]
+    settings = TraceSettings(min_path_pixels=10, simplify_pixels=1.5,
+                             skeleton_preservation=0.75)
+    cleaned = clean_topological_artifacts([path], settings)
+    assert len(cleaned) == 1
+    assert len(cleaned[0]) < len(path)
+    assert cleaned[0][0] == path[0]
+    assert cleaned[0][-1] == path[-1]
+
+
+def test_topology_cleanup_keeps_large_closed_ornament():
+    ornament = [(0, 0), (20, 0), (30, 15), (20, 30), (0, 30),
+                (-10, 15), (0, 0)]
+    cleaned = clean_topological_artifacts(
+        [ornament], TraceSettings(min_path_pixels=8, skeleton_preservation=0.5))
+    assert cleaned == [ornament]
 
 
 def test_probability_ridges_keep_major_seam_and_reduce_texture_network():
